@@ -7,7 +7,7 @@ import io
 import importlib
 import streamlit as st
 import pandas as pd
-from schemas import detect_schema, KNOWN_SCHEMAS
+from schemas import detect_schema, KNOWN_SCHEMAS, normalize_name, check_filename_includes
 from sample_data import generate_sample_datasets
 import app_lookup
 import azure_recommender
@@ -44,21 +44,23 @@ if "active_app_num" not in st.session_state:
     st.session_state.active_app_num = ""
 
 
-def load_file_into_state(file_name, file_bytes):
+def load_file_into_state(file_name, file_bytes, expected_schema=None):
     """Parses uploaded file bytes (Excel or CSV) into DataFrames in session state."""
     try:
+        schema = detect_schema(file_name)
+        if schema == "Custom / Unknown" and expected_schema:
+            schema = expected_schema
+
         if file_name.endswith((".xlsx", ".xls")):
             excel_file = pd.ExcelFile(io.BytesIO(file_bytes))
             sheet_names = excel_file.sheet_names
-            # Default to first sheet or vInfo if RVTools
             preferred_sheet = sheet_names[0]
             for s in sheet_names:
-                if "vinfo" in s.lower() or "server" in s.lower():
+                if "server" in s.lower() or "sheet" in s.lower() or "data" in s.lower():
                     preferred_sheet = s
                     break
 
             df = pd.read_excel(excel_file, sheet_name=preferred_sheet)
-            schema = detect_schema(df.columns)
             st.session_state.datasets[file_name] = {
                 "file_bytes": file_bytes,
                 "df": df,
@@ -70,7 +72,6 @@ def load_file_into_state(file_name, file_bytes):
         else:
             # CSV file
             df = pd.read_csv(io.BytesIO(file_bytes))
-            schema = detect_schema(df.columns)
             st.session_state.datasets[file_name] = {
                 "file_bytes": file_bytes,
                 "df": df,
@@ -80,7 +81,7 @@ def load_file_into_state(file_name, file_bytes):
                 "is_excel": False
             }
     except Exception as e:
-        st.sidebar.error(f"Error loading {file_name}: {e}")
+        st.error(f"Error loading {file_name}: {e}")
 
 
 def load_sample_data():
@@ -88,7 +89,7 @@ def load_sample_data():
     samples = generate_sample_datasets()
     st.session_state.datasets.clear()
     for name, df in samples.items():
-        schema = detect_schema(df.columns)
+        schema = detect_schema(name)
         st.session_state.datasets[name] = {
             "df": df,
             "detected_schema": schema,
@@ -116,46 +117,25 @@ with st.sidebar:
     st.caption("Application Sizing & Excel Explorer")
     st.markdown("---")
 
-    st.subheader("1. File Upload")
-    uploaded_files = st.file_uploader(
-        "Upload Excel (.xlsx, .xls) or CSV files",
-        type=["xlsx", "xls", "csv"],
-        accept_multiple_files=True,
-        help="Upload ARM, BA-AS-A-SERVER, RV_TOOLS, CMDB, or Axonius files"
-    )
+    st.subheader("📋 Dataset Status")
+    slots_info = [
+        ("ARM Service Now", "ARM SERVICE NOW FILE", "ARM Service now"),
+        ("BA_AS_SERVER", "BA-AS-A-SERVER", "ba_as_server"),
+        ("CMDB_CI_SERVER", "CMDB-CI-SERVER", "cmdb_ci_server")
+    ]
 
-    if uploaded_files:
-        for uf in uploaded_files:
-            if uf.name not in st.session_state.datasets:
-                load_file_into_state(uf.name, uf.getvalue())
-
-    col_sample, col_clear = st.columns([1, 1])
-    with col_sample:
-        if st.button("🧪 Sample Data", help="Load built-in mock datasets to test immediately"):
-            load_sample_data()
-            st.session_state.active_app_num = ""
-            st.rerun()
-    with col_clear:
-        if st.button("🗑️ Clear All", help="Clear loaded datasets"):
-            st.session_state.datasets.clear()
-            st.session_state.active_app_num = ""
-            st.rerun()
+    for label, schema_key, keyword in slots_info:
+        meta_entry = next(((k, v) for k, v in st.session_state.datasets.items() if v.get("detected_schema") == schema_key), None)
+        if meta_entry:
+            fname, meta = meta_entry
+            st.markdown(f"**🟢 {label}**")
+            st.caption(f"`{fname}` | Rows: **{len(meta['df']):,}**")
+        else:
+            st.markdown(f"**⚪ {label}**")
+            st.caption(f"Waiting for upload (includes `{keyword}`)")
 
     st.markdown("---")
-    st.subheader("2. Loaded Datasets")
-    if not st.session_state.datasets:
-        st.info("No files loaded yet. Upload files above or click Sample Data.")
-    else:
-        for fname, meta in st.session_state.datasets.items():
-            detected = meta["detected_schema"]
-            row_count = len(meta["df"])
-            col_count = len(meta["df"].columns)
-            badge_color = "🟢" if detected != "Custom / Unknown" else "⚪"
-            st.markdown(f"**{badge_color} {fname}**")
-            st.caption(f"Type: `{detected}` | Rows: **{row_count:,}** | Cols: **{col_count}**")
-
-    st.markdown("---")
-    st.subheader("3. Consolidated Export")
+    st.subheader("📥 Consolidated Export")
     if st.session_state.datasets:
         export_dict = {}
         for fname, meta in st.session_state.datasets.items():
@@ -164,26 +144,154 @@ with st.sidebar:
 
         all_excel_bytes = convert_df_to_excel_bytes(export_dict)
         st.download_button(
-            label="📥 Download All Datasets (.xlsx)",
+            label="📥 Download Datasets (.xlsx)",
             data=all_excel_bytes,
             file_name="migration_datasets_consolidated.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             width="stretch"
         )
+    else:
+        st.caption("Export available once files are loaded.")
 
 
 # ---------------- MAIN CONTENT ----------------
+st.title("☁️ Azure Migration Assistant")
+st.caption("Application Hardware Sizing & Target Architecture Planner")
+
+# Dedicated Upload Section on Main Page
+with st.container(border=True):
+    col_u_hdr, col_u_actions = st.columns([3, 1.8], vertical_alignment="center")
+    with col_u_hdr:
+        st.subheader("📤 Dataset Uploads")
+        st.caption("Upload each file separately. Datasets are identified based on whether the filename includes `ARM Service now`, `ba_as_server`, or `cmdb_ci_server`.")
+    with col_u_actions:
+        col_btn_sample, col_btn_clear = st.columns(2)
+        with col_btn_sample:
+            if st.button("🧪 Sample Data", width="stretch", help="Load built-in mock datasets"):
+                load_sample_data()
+                st.session_state.active_app_num = ""
+                st.rerun()
+        with col_btn_clear:
+            if st.button("🗑️ Clear All", width="stretch", help="Clear all loaded datasets"):
+                st.session_state.datasets.clear()
+                st.session_state.active_app_num = ""
+                for k in ["last_arm_upload", "last_ba_upload", "last_cmdb_upload"]:
+                    st.session_state.pop(k, None)
+                st.rerun()
+
+    col_arm, col_ba, col_cmdb = st.columns(3)
+
+    # 1. ARM Service Now Slot
+    with col_arm:
+        with st.container(border=True):
+            st.markdown("##### 1. ARM Service Now")
+            st.caption("Catalog & metadata (includes `ARM Service now`)")
+            arm_file = st.file_uploader(
+                "Upload ARM Service Now (.xlsx, .csv)",
+                type=["xlsx", "xls", "csv"],
+                key="uploader_arm_file",
+                label_visibility="collapsed"
+            )
+            if arm_file is not None:
+                if st.session_state.get("last_arm_upload") != arm_file.name:
+                    to_del = [k for k, v in st.session_state.datasets.items() if v.get("detected_schema") == "ARM SERVICE NOW FILE"]
+                    for k in to_del:
+                        del st.session_state.datasets[k]
+                    st.session_state["last_arm_upload"] = arm_file.name
+                    load_file_into_state(arm_file.name, arm_file.getvalue(), expected_schema="ARM SERVICE NOW FILE")
+                    st.session_state.active_app_num = ""
+                    st.rerun()
+            elif st.session_state.get("last_arm_upload"):
+                prev = st.session_state.pop("last_arm_upload", None)
+                if prev and prev in st.session_state.datasets:
+                    del st.session_state.datasets[prev]
+                    st.session_state.active_app_num = ""
+                    st.rerun()
+
+            arm_meta = next(((k, v) for k, v in st.session_state.datasets.items() if v.get("detected_schema") == "ARM SERVICE NOW FILE"), None)
+            if arm_meta:
+                fname, meta = arm_meta
+                matched = check_filename_includes(fname, "ARM Service now") or ("arm" in normalize_name(fname) and "service" in normalize_name(fname))
+                match_tag = "✅ Keyword verified" if matched else "⚠️ Keyword not in filename"
+                st.success(f"🟢 **{fname}**\n\nRows: **{len(meta['df']):,}** | Cols: **{len(meta['df'].columns)}**\n\n*{match_tag}*")
+            else:
+                st.info("⚪ *Not uploaded yet*")
+
+    # 2. BA_AS_SERVER Slot
+    with col_ba:
+        with st.container(border=True):
+            st.markdown("##### 2. BA_AS_SERVER")
+            st.caption("App-to-server mapping (includes `ba_as_server`)")
+            ba_file = st.file_uploader(
+                "Upload BA_AS_SERVER (.xlsx, .csv)",
+                type=["xlsx", "xls", "csv"],
+                key="uploader_ba_file",
+                label_visibility="collapsed"
+            )
+            if ba_file is not None:
+                if st.session_state.get("last_ba_upload") != ba_file.name:
+                    to_del = [k for k, v in st.session_state.datasets.items() if v.get("detected_schema") == "BA-AS-A-SERVER"]
+                    for k in to_del:
+                        del st.session_state.datasets[k]
+                    st.session_state["last_ba_upload"] = ba_file.name
+                    load_file_into_state(ba_file.name, ba_file.getvalue(), expected_schema="BA-AS-A-SERVER")
+                    st.session_state.active_app_num = ""
+                    st.rerun()
+            elif st.session_state.get("last_ba_upload"):
+                prev = st.session_state.pop("last_ba_upload", None)
+                if prev and prev in st.session_state.datasets:
+                    del st.session_state.datasets[prev]
+                    st.session_state.active_app_num = ""
+                    st.rerun()
+
+            ba_meta = next(((k, v) for k, v in st.session_state.datasets.items() if v.get("detected_schema") == "BA-AS-A-SERVER"), None)
+            if ba_meta:
+                fname, meta = ba_meta
+                matched = check_filename_includes(fname, "ba_as_server") or check_filename_includes(fname, "ba_as_a_server")
+                match_tag = "✅ Keyword verified" if matched else "⚠️ Keyword not in filename"
+                st.success(f"🟢 **{fname}**\n\nRows: **{len(meta['df']):,}** | Cols: **{len(meta['df'].columns)}**\n\n*{match_tag}*")
+            else:
+                st.info("⚪ *Not uploaded yet*")
+
+    # 3. CMDB_CI_SERVER Slot
+    with col_cmdb:
+        with st.container(border=True):
+            st.markdown("##### 3. CMDB_CI_SERVER")
+            st.caption("Server hardware specs & OS (includes `cmdb_ci_server`)")
+            cmdb_file = st.file_uploader(
+                "Upload CMDB_CI_SERVER (.xlsx, .csv)",
+                type=["xlsx", "xls", "csv"],
+                key="uploader_cmdb_file",
+                label_visibility="collapsed"
+            )
+            if cmdb_file is not None:
+                if st.session_state.get("last_cmdb_upload") != cmdb_file.name:
+                    to_del = [k for k, v in st.session_state.datasets.items() if v.get("detected_schema") == "CMDB-CI-SERVER"]
+                    for k in to_del:
+                        del st.session_state.datasets[k]
+                    st.session_state["last_cmdb_upload"] = cmdb_file.name
+                    load_file_into_state(cmdb_file.name, cmdb_file.getvalue(), expected_schema="CMDB-CI-SERVER")
+                    st.session_state.active_app_num = ""
+                    st.rerun()
+            elif st.session_state.get("last_cmdb_upload"):
+                prev = st.session_state.pop("last_cmdb_upload", None)
+                if prev and prev in st.session_state.datasets:
+                    del st.session_state.datasets[prev]
+                    st.session_state.active_app_num = ""
+                    st.rerun()
+
+            cmdb_meta = next(((k, v) for k, v in st.session_state.datasets.items() if v.get("detected_schema") == "CMDB-CI-SERVER"), None)
+            if cmdb_meta:
+                fname, meta = cmdb_meta
+                matched = check_filename_includes(fname, "cmdb_ci_server")
+                match_tag = "✅ Keyword verified" if matched else "⚠️ Keyword not in filename"
+                st.success(f"🟢 **{fname}**\n\nRows: **{len(meta['df']):,}** | Cols: **{len(meta['df'].columns)}**\n\n*{match_tag}*")
+            else:
+                st.info("⚪ *Not uploaded yet*")
+
 if not st.session_state.datasets:
-    # Empty State Welcome
-    st.title("☁️ Azure Migration Assistant")
-    st.markdown("""
-    Welcome! This tool allows you to:
-    1. **Look up any specific application by Application Number** to immediately view its metadata, linked servers, and hardware sizing rollup (vCPUs, RAM, and Disk storage).
-    2. **Inspect and search** uploaded Excel files (`ARM`, `BA-AS-A-SERVER`, `RV_TOOLS`, `CMDB-CI-SERVER`, `AXONIUS`).
-    3. **Export** application sizing reports and consolidated workbooks to Excel.
-    
-    👉 **Get Started:** Drag and drop your Excel files into the sidebar on the left, or click **🧪 Sample Data** to preview with mock data immediately!
-    """)
+    # Empty State Guidance
+    st.info("💡 **Getting Started:** Upload the Excel or CSV files above for **ARM Service Now**, **BA_AS_SERVER**, and **CMDB_CI_SERVER**, or click **🧪 Sample Data** to preview application sizing immediately.")
 else:
     # Top-level Tabs
     main_tab_lookup, main_tab_explorer = st.tabs(["🎯 Application Sizing Lookup", "📁 Raw Datasets Explorer"])
@@ -509,7 +617,7 @@ else:
                             meta["active_sheet"] = new_sheet
                             new_df = pd.read_excel(io.BytesIO(meta["file_bytes"]), sheet_name=new_sheet)
                             meta["df"] = new_df
-                            meta["detected_schema"] = detect_schema(new_df.columns)
+                            meta["detected_schema"] = detect_schema(file_name)
                             st.rerun()
 
                 schema_info = KNOWN_SCHEMAS.get(detected, {})

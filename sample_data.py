@@ -41,72 +41,29 @@ def generate_sample_datasets():
     }
     df_ba = pd.DataFrame(ba_data)
 
-    # 3. RV_TOOLS (VMware VMs)
-    rv_data = {
-        "VM": ["web01-vm", "db01-vm", "spark-worker01-vm", "auth01-vm"],
-        "DNS Name": [
-            "web01.prod.corp.local",
-            "db01.prod.corp.local",
-            "spark-worker01.data.corp.local",
-            "auth01.sec.corp.local"
-        ],
-        "Powerstate": ["poweredOn", "poweredOn", "poweredOn", "poweredOn"],
-        "CPUs": [4, 16, 8, 4],
-        "Memory": [16384, 65536, 32768, 16384],  # In MB
-        "Total disk capacity MiB": [204800, 1048576, 512000, 102400],
-        "In Use MiB": [85000, 620000, 240000, 45000],
-        "Datacenter": ["DC-East", "DC-East", "DC-West", "DC-East"],
-        "Cluster": ["Cluster-Web", "Cluster-DB", "Cluster-Data", "Cluster-Auth"],
-        "Host": ["esxi-01.corp.local", "esxi-02.corp.local", "esxi-09.corp.local", "esxi-03.corp.local"]
-    }
-    df_rv = pd.DataFrame(rv_data)
-
-    # 4. CMDB-CI-SERVER (Physical & Cloud fallback)
+    # 3. CMDB_CI_SERVER (Server Hardware Specs, OS, and Storage)
     cmdb_data = {
-        "name": ["erp-app01", "web01", "db01", "auth01"],
+        "name": ["erp-app01", "web01", "db01", "spark-worker01", "auth01"],
         "fqdn": [
             "erp-app01.prod.corp.local",
             "web01.prod.corp.local",
             "db01.prod.corp.local",
-            "auth01.sec.corp.local"
-        ],
-        "operational_status": ["Operational", "Operational", "Operational", "Operational"],
-        "virtual": ["false", "true", "true", "true"],
-        "cpu_core_count": [32, 4, 16, 4],
-        "ram": ["128 GB", "16 GB", "64 GB", "16 GB"],
-        "disk_space": [2048, 200, 1000, 100],  # In GB
-        "os": ["Windows Server 2019", "Red Hat Enterprise Linux 8", "Windows Server 2022", "Windows Server 2022"],
-        "manufacturer": ["Dell Inc.", "VMware, Inc.", "VMware, Inc.", "VMware, Inc."],
-        "model_id": ["PowerEdge R740", "VMware Virtual Platform", "VMware Virtual Platform", "VMware Virtual Platform"]
-    }
-    df_cmdb = pd.DataFrame(cmdb_data)
-
-    # 5. AXONIUS DEVICES
-    axonius_data = {
-        "Aggregated: Preferred Host Name (FQDN)": [
-            "web01.prod.corp.local",
-            "db01.prod.corp.local",
-            "erp-app01.prod.corp.local",
             "spark-worker01.data.corp.local",
             "auth01.sec.corp.local"
         ],
-        "Aggregated: Preferred Total CPU Cores": [4, 16, 32, 8, 4],
-        "Aggregated: Preferred Total RAM (GB)": [16, 64, 128, 32, 16],
-        "Aggregated: Preferred Total Disk Space (GB)": [200, 1024, 2048, 500, 100],
-        "Aggregated: Preferred OS: Full String": [
-            "Red Hat Enterprise Linux 8.8",
-            "Microsoft Windows Server 2022 Standard",
-            "Microsoft Windows Server 2019 Datacenter",
-            "Ubuntu 22.04.3 LTS",
-            "Microsoft Windows Server 2022 Standard"
-        ]
+        "operational_status": ["Operational", "Operational", "Operational", "Operational", "Operational"],
+        "virtual": ["false", "true", "true", "true", "true"],
+        "cpu_core_count": [32, 4, 16, 8, 4],
+        "ram": ["128 GB", "16 GB", "64 GB", "32 GB", "16 GB"],
+        "disk_space": [2048, 200, 1000, 500, 100],  # In GB
+        "os": ["Windows Server 2019", "Red Hat Enterprise Linux 8", "Windows Server 2022", "Ubuntu 22.04 LTS", "Windows Server 2022"],
+        "manufacturer": ["Dell Inc.", "VMware, Inc.", "VMware, Inc.", "Dell Inc.", "VMware, Inc."],
+        "model_id": ["PowerEdge R740", "VMware Virtual Platform", "VMware Virtual Platform", "PowerEdge R640", "VMware Virtual Platform"]
     }
-    df_axonius = pd.DataFrame(axonius_data)
+    df_cmdb = pd.DataFrame(cmdb_data)
 
     return {
-        "ARM SERVICE NOW FILE.xlsx": df_arm,
-        "BA-AS-A-SERVER.xlsx": df_ba,
-        "RV_TOOLS.xlsx": df_rv,
-        "CMDB-CI-SERVER.xlsx": df_cmdb,
-        "AXONIUS DEVICES.xlsx": df_axonius
+        "ARM ServiceNow Data.xlsx": df_arm,
+        "BA_AS_Server_No_Filter.xlsx": df_ba,
+        "cmdb_ci_server.xlsx": df_cmdb
     }
