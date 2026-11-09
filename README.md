@@ -42,3 +42,12 @@ The application will open in your browser at `http://localhost:8501`.
    - One-click **Consolidated Excel Export** that combines all uploaded datasets into a single workbook with individual tabs.
 6. **Built-in Sample Data**:
    - Click the **🧪 Sample Data** button in the sidebar to instantly populate realistic mock datasets matching the schemas in `schema.md`.
+
+## Azure sizing rules
+
+Recommendations follow `azure_research.md` (Canada Central, Flexible Server, D/E/B-series v5):
+
+- **Production:** General Purpose (D-series v5, 1:4) by default. Memory Optimized (E-series, 1:8) only when source RAM:vCPU is above 4:1 or *Force Memory Optimized* is on.
+- **Non-production:** Burstable (B-series), dev/test only. Stop off-hours. No zone-redundant HA.
+- **Optional inputs:** peak CPU % sizes vCPUs at 65% target utilization; hot working set GB sizes RAM at 1.5x. Without them, cores map 1:1 and RAM uses 1.25x source RAM.
+- **Storage:** +30% MVCC/WAL headroom on allocated disk, 32 GiB minimum.

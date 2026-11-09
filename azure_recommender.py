@@ -1,7 +1,8 @@
 """
 Azure Database for PostgreSQL - Flexible Server Sizing Recommender.
-Translates on-premise hardware footprints (IBM Db2 or generic) to optimal Azure Flexible Server SKUs,
+Translates on-premise hardware footprints (IBM Db2 or generic) to Azure Flexible Server SKUs,
 applying sizing headroom, MVCC/WAL overhead, and HA architecture recommendations.
+Rules follow azure_research.md (Canada Central, v5 SKUs, General Purpose by default).
 Focuses strictly on architectural sizing and technical reasoning without speculative pricing.
 """
 
@@ -9,122 +10,57 @@ import math
 from typing import Dict, Any, List, Optional
 
 
-# Azure Flexible Server SKU Catalog
+# Azure Flexible Server SKU Catalog (Canada Central: v5 series; v6 is not offered there)
 SKU_CATALOG = [
-    # General Purpose (D-Series v6) - 1:4 Core-to-RAM Ratio
-    {
-        "tier": "General Purpose",
-        "family": "D-Series v6",
-        "sku": "Standard_D2ds_v6",
-        "vcpus": 2,
-        "memory_gib": 8,
-    },
-    {
-        "tier": "General Purpose",
-        "family": "D-Series v6",
-        "sku": "Standard_D4ds_v6",
-        "vcpus": 4,
-        "memory_gib": 16,
-    },
-    {
-        "tier": "General Purpose",
-        "family": "D-Series v6",
-        "sku": "Standard_D8ds_v6",
-        "vcpus": 8,
-        "memory_gib": 32,
-    },
-    {
-        "tier": "General Purpose",
-        "family": "D-Series v6",
-        "sku": "Standard_D16ds_v6",
-        "vcpus": 16,
-        "memory_gib": 64,
-    },
-    {
-        "tier": "General Purpose",
-        "family": "D-Series v6",
-        "sku": "Standard_D32ds_v6",
-        "vcpus": 32,
-        "memory_gib": 128,
-    },
-    {
-        "tier": "General Purpose",
-        "family": "D-Series v6",
-        "sku": "Standard_D48ds_v6",
-        "vcpus": 48,
-        "memory_gib": 192,
-    },
-    {
-        "tier": "General Purpose",
-        "family": "D-Series v6",
-        "sku": "Standard_D64ds_v6",
-        "vcpus": 64,
-        "memory_gib": 256,
-    },
-    {
-        "tier": "General Purpose",
-        "family": "D-Series v6",
-        "sku": "Standard_D96ds_v6",
-        "vcpus": 96,
-        "memory_gib": 384,
-    },
-    # Memory Optimized (E-Series v5) - 1:8 Core-to-RAM Ratio
-    {
-        "tier": "Memory Optimized",
-        "family": "E-Series v5",
-        "sku": "Standard_E2ds_v5",
-        "vcpus": 2,
-        "memory_gib": 16,
-    },
-    {
-        "tier": "Memory Optimized",
-        "family": "E-Series v5",
-        "sku": "Standard_E4ds_v5",
-        "vcpus": 4,
-        "memory_gib": 32,
-    },
-    {
-        "tier": "Memory Optimized",
-        "family": "E-Series v5",
-        "sku": "Standard_E8ds_v5",
-        "vcpus": 8,
-        "memory_gib": 64,
-    },
-    {
-        "tier": "Memory Optimized",
-        "family": "E-Series v5",
-        "sku": "Standard_E16ds_v5",
-        "vcpus": 16,
-        "memory_gib": 128,
-    },
-    {
-        "tier": "Memory Optimized",
-        "family": "E-Series v5",
-        "sku": "Standard_E32ds_v5",
-        "vcpus": 32,
-        "memory_gib": 256,
-    },
-    {
-        "tier": "Memory Optimized",
-        "family": "E-Series v5",
-        "sku": "Standard_E48ds_v5",
-        "vcpus": 48,
-        "memory_gib": 384,
-    },
-    {
-        "tier": "Memory Optimized",
-        "family": "E-Series v5",
-        "sku": "Standard_E64ds_v5",
-        "vcpus": 64,
-        "memory_gib": 512,
-    },
+    # Burstable (B-series) - dev/test only. No zone-redundant HA, no read replicas, no reservations.
+    {"tier": "Burstable", "family": "B-Series", "sku": "Standard_B1ms", "vcpus": 1, "memory_gib": 2},
+    {"tier": "Burstable", "family": "B-Series", "sku": "Standard_B2s", "vcpus": 2, "memory_gib": 4},
+    {"tier": "Burstable", "family": "B-Series", "sku": "Standard_B2ms", "vcpus": 2, "memory_gib": 8},
+    {"tier": "Burstable", "family": "B-Series", "sku": "Standard_B4ms", "vcpus": 4, "memory_gib": 16},
+    {"tier": "Burstable", "family": "B-Series", "sku": "Standard_B8ms", "vcpus": 8, "memory_gib": 32},
+    {"tier": "Burstable", "family": "B-Series", "sku": "Standard_B12ms", "vcpus": 12, "memory_gib": 48},
+    {"tier": "Burstable", "family": "B-Series", "sku": "Standard_B16ms", "vcpus": 16, "memory_gib": 64},
+    {"tier": "Burstable", "family": "B-Series", "sku": "Standard_B20ms", "vcpus": 20, "memory_gib": 80},
+    # General Purpose (D-Series v5) - 1:4 core-to-RAM ratio (default for production)
+    {"tier": "General Purpose", "family": "D-Series v5", "sku": "Standard_D2ds_v5", "vcpus": 2, "memory_gib": 8},
+    {"tier": "General Purpose", "family": "D-Series v5", "sku": "Standard_D4ds_v5", "vcpus": 4, "memory_gib": 16},
+    {"tier": "General Purpose", "family": "D-Series v5", "sku": "Standard_D8ds_v5", "vcpus": 8, "memory_gib": 32},
+    {"tier": "General Purpose", "family": "D-Series v5", "sku": "Standard_D16ds_v5", "vcpus": 16, "memory_gib": 64},
+    {"tier": "General Purpose", "family": "D-Series v5", "sku": "Standard_D32ds_v5", "vcpus": 32, "memory_gib": 128},
+    {"tier": "General Purpose", "family": "D-Series v5", "sku": "Standard_D48ds_v5", "vcpus": 48, "memory_gib": 192},
+    {"tier": "General Purpose", "family": "D-Series v5", "sku": "Standard_D64ds_v5", "vcpus": 64, "memory_gib": 256},
+    {"tier": "General Purpose", "family": "D-Series v5", "sku": "Standard_D96ds_v5", "vcpus": 96, "memory_gib": 384},
+    # Memory Optimized (E-Series v5) - 1:8 core-to-RAM ratio (large working sets)
+    {"tier": "Memory Optimized", "family": "E-Series v5", "sku": "Standard_E2ds_v5", "vcpus": 2, "memory_gib": 16},
+    {"tier": "Memory Optimized", "family": "E-Series v5", "sku": "Standard_E4ds_v5", "vcpus": 4, "memory_gib": 32},
+    {"tier": "Memory Optimized", "family": "E-Series v5", "sku": "Standard_E8ds_v5", "vcpus": 8, "memory_gib": 64},
+    {"tier": "Memory Optimized", "family": "E-Series v5", "sku": "Standard_E16ds_v5", "vcpus": 16, "memory_gib": 128},
+    {"tier": "Memory Optimized", "family": "E-Series v5", "sku": "Standard_E32ds_v5", "vcpus": 32, "memory_gib": 256},
+    {"tier": "Memory Optimized", "family": "E-Series v5", "sku": "Standard_E48ds_v5", "vcpus": 48, "memory_gib": 384},
+    {"tier": "Memory Optimized", "family": "E-Series v5", "sku": "Standard_E64ds_v5", "vcpus": 64, "memory_gib": 512},
 ]
 
 # Sizing translation constants
-CPU_CORE_RATIO = 1.0
-MEMORY_HEADROOM_FACTOR = 1.25
+CPU_CORE_RATIO = 1.0                # default: 1:1 source cores (used when no peak CPU is given)
+MEMORY_HEADROOM_FACTOR = 1.25       # default: source RAM headroom (used when no working set is given)
+WORKING_SET_RAM_FACTOR = 1.5        # hot working set -> RAM target
+TARGET_CPU_UTILIZATION = 0.65       # size vCores so peak load sits at ~65%
+MEMORY_RATIO_THRESHOLD = 4.0        # source RAM:vCPU above 4:1 -> Memory Optimized
 STORAGE_MVCC_OVERHEAD_FACTOR = 1.30
-BASELINE_FREE_IOPS = 3000
+BASELINE_FREE_IOPS = 3000           # Premium SSD v2 free IOPS under 400 GiB
+LARGE_DISK_FREE_IOPS = 12000        # Premium SSD v2 free IOPS at 400 GiB and above
+LARGE_DISK_GIB = 400
+
+# VM-level IOPS ceilings (research: effective IOPS = min(disk, VM cap)). Burstable caps are not listed here.
+VM_IOPS_CAP = {
+    "Standard_D2ds_v5": 3750, "Standard_D4ds_v5": 6400, "Standard_D8ds_v5": 12800,
+    "Standard_D16ds_v5": 25600, "Standard_D32ds_v5": 51200, "Standard_D48ds_v5": 76800,
+    "Standard_D64ds_v5": 80000, "Standard_D96ds_v5": 80000,
+    "Standard_E2ds_v5": 3200, "Standard_E4ds_v5": 6400, "Standard_E8ds_v5": 12800,
+    "Standard_E16ds_v5": 25600, "Standard_E32ds_v5": 51200, "Standard_E48ds_v5": 76800,
+    "Standard_E64ds_v5": 80000,
+}
+HA_FAILOVER_SECONDS = "60-120"
 
 
 def extract_domain_from_fqdn(fqdn: str) -> str:
@@ -137,10 +73,31 @@ def extract_domain_from_fqdn(fqdn: str) -> str:
     return "local"
 
 
+def fit_sku(target_vcpus: int, target_ram_gib: float, tier: str) -> Optional[Dict[str, Any]]:
+    """Smallest SKU in `tier` meeting both targets, or None if the tier is too small."""
+    skus = sorted((x for x in SKU_CATALOG if x["tier"].lower() == tier.lower()), key=lambda x: (x["vcpus"], x["memory_gib"]))
+    return next((x for x in skus if x["vcpus"] >= target_vcpus and x["memory_gib"] >= target_ram_gib), None)
+
+
+def pick_sku(target_vcpus: int, target_ram_gib: float, tier: str) -> Dict[str, Any]:
+    """Best-fit SKU, preferring Memory Optimized when it needs fewer vCPUs than General Purpose."""
+    sku = select_azure_sku(target_vcpus, target_ram_gib, tier)
+    if tier == "General Purpose":
+        mo, gp = fit_sku(target_vcpus, target_ram_gib, "Memory Optimized"), fit_sku(target_vcpus, target_ram_gib, "General Purpose")
+        if mo and (gp is None or mo["vcpus"] < gp["vcpus"]):
+            return mo
+    return sku
+
+
+def free_storage_iops(storage_gib: int) -> int:
+    """Premium SSD v2 free IOPS: 3,000 under 400 GiB, 12,000 at 400 GiB and above."""
+    return LARGE_DISK_FREE_IOPS if storage_gib >= LARGE_DISK_GIB else BASELINE_FREE_IOPS
+
+
 def select_azure_sku(target_vcpus: int, target_ram_gib: float, preferred_tier: str) -> Dict[str, Any]:
     """
     Selects the best-fit SKU within the preferred tier that satisfies both
-    target vCPUs and target RAM. Falls back to other tier if capacity exceeds current tier.
+    target vCPUs and target RAM. Falls back to other tiers if capacity exceeds the preferred tier.
     """
     tier_skus = [s for s in SKU_CATALOG if s["tier"].lower() == preferred_tier.lower()]
     tier_skus.sort(key=lambda s: (s["vcpus"], s["memory_gib"]))
@@ -150,8 +107,8 @@ def select_azure_sku(target_vcpus: int, target_ram_gib: float, preferred_tier: s
         if sku["vcpus"] >= target_vcpus and sku["memory_gib"] >= target_ram_gib:
             return sku
 
-    # If exceeding tier, check if the other tier has a larger SKU
-    all_skus = sorted(SKU_CATALOG, key=lambda s: (s["vcpus"], s["memory_gib"]))
+    # If exceeding tier, check the whole catalog (General Purpose first, then the rest)
+    all_skus = sorted(SKU_CATALOG, key=lambda s: (s["tier"] == "Burstable", s["vcpus"], s["memory_gib"]))
     for sku in all_skus:
         if sku["vcpus"] >= target_vcpus and sku["memory_gib"] >= target_ram_gib:
             return sku
@@ -167,57 +124,163 @@ def recommend_azure_postgresql(
     source_engine: str = "IBM Db2",
     is_production: bool = True,
     ha_override: Optional[bool] = None,
+    peak_cpu_pct: Optional[float] = None,
+    working_set_gb: Optional[float] = None,
+    force_memory_optimized: bool = False,
 ) -> Dict[str, Any]:
     """
     Computes Azure Database for PostgreSQL Flexible Server architectural sizing recommendations.
 
     Parameters:
-    - vcpus: total source vCPU cores
-    - ram_gb: total source RAM in GB
+    - vcpus: total source vCPU cores (allocated)
+    - ram_gb: total source RAM in GB (allocated)
     - disk_gb: total source allocated/in-use disk in GB
-    - source_engine: source database engine (default 'IBM Db2')
-    - is_production: boolean indicating production environment
-    - ha_override: optional explicit HA enable/disable toggle
+    - source_engine: source database engine (informational; does not force a tier)
+    - is_production: production workloads get General Purpose / Memory Optimized; non-prod gets Burstable
+    - ha_override: optional explicit HA toggle (ignored for Burstable, which has no zone-redundant HA)
+    - peak_cpu_pct: optional observed peak CPU utilization (0-100). If set, vCores = vcpus * peak / 65%
+    - working_set_gb: optional hot working set. If set, RAM target = working set * 1.5
+    - force_memory_optimized: force the Memory Optimized (E-series) tier for production
     """
-    # 1. Determine High Availability recommendation
-    if ha_override is not None:
-        ha_enabled = ha_override
-    else:
-        ha_enabled = is_production
-
-    # 2. Compute Target Sizing with Headroom
-    # Azure min compute is 2 vCPUs
-    target_vcpus = max(2, int(math.ceil(vcpus * CPU_CORE_RATIO))) if vcpus > 0 else 2
-    target_ram_gib = round(max(8.0, ram_gb * MEMORY_HEADROOM_FACTOR), 1) if ram_gb > 0 else 8.0
-    # Storage minimum 32 GiB in Azure Flexible Server
-    target_storage_gib = max(32, int(math.ceil(disk_gb * STORAGE_MVCC_OVERHEAD_FACTOR))) if disk_gb > 0 else 32
-
-    # 3. Determine Tier (Memory Optimized vs General Purpose)
-    is_memory_heavy = (ram_gb > (vcpus * 4.0)) or (ram_gb > 32.0)
-    if is_memory_heavy or "db2" in source_engine.lower():
-        preferred_tier = "Memory Optimized"
+    # 1. Tier selection (research: GP default; E-series only for large working sets; Burstable for non-prod)
+    ratio = (ram_gb / vcpus) if vcpus > 0 else 0.0
+    if not is_production:
+        preferred_tier = "Burstable"
         tier_reason = (
-            f"On-premise RAM ({ram_gb:.1f} GB) to core ({vcpus:.0f} vCPUs) ratio is "
-            f"{ram_gb/max(1, vcpus):.1f}:1 (> 4:1) or total memory exceeds 32 GB. "
-            f"When migrating from {source_engine} to PostgreSQL, high bufferpool allocations and "
-            "connection worker caching require the 1:8 core-to-RAM ratio to avoid cache starvation."
+            "Non-production workload: Burstable (B-series) is used for dev/test only. Burstable is not "
+            "recommended for production, has no zone-redundant HA, no read replicas and no reservations. "
+            "Stop the server off-hours to reduce cost."
+        )
+    elif force_memory_optimized or ratio > MEMORY_RATIO_THRESHOLD:
+        preferred_tier = "Memory Optimized"
+        reason_bits = []
+        if ratio > MEMORY_RATIO_THRESHOLD:
+            reason_bits.append(f"source RAM:vCPU ratio is {ratio:.1f}:1 (above {MEMORY_RATIO_THRESHOLD:.0f}:1)")
+        if force_memory_optimized:
+            reason_bits.append("Memory Optimized was selected manually")
+        tier_reason = (
+            "Memory Optimized (E-series, 1:8) is used because " + " and ".join(reason_bits) + ". "
+            "A large working set needs more RAM for caching than General Purpose provides."
         )
     else:
         preferred_tier = "General Purpose"
         tier_reason = (
-            f"On-premise RAM ({ram_gb:.1f} GB) to core ({vcpus:.0f} vCPUs) ratio fits the standard 1:4 "
-            "General Purpose profile, suitable for standard transaction volumes with balanced CPU and memory."
+            f"General Purpose (D-series v5, 1:4) is the default for production. Source RAM:vCPU ratio is "
+            f"{ratio:.1f}:1, so no memory-heavy profile is needed."
         )
 
-    # 4. Select SKU
-    recommended_sku = select_azure_sku(target_vcpus, target_ram_gib, preferred_tier)
+    # 2. vCPU target
+    min_vcpus = 1 if preferred_tier == "Burstable" else 2
+    if peak_cpu_pct and peak_cpu_pct > 0 and vcpus > 0:
+        cpu_basis = f"peak CPU {peak_cpu_pct:.0f}% at {TARGET_CPU_UTILIZATION:.0%} target utilization"
+        target_vcpus = max(min_vcpus, int(math.ceil(vcpus * (peak_cpu_pct / 100.0) / TARGET_CPU_UTILIZATION)))
+    else:
+        cpu_basis = f"allocated source cores ({CPU_CORE_RATIO:.0f}:1)"
+        target_vcpus = max(min_vcpus, int(math.ceil(vcpus * CPU_CORE_RATIO))) if vcpus > 0 else min_vcpus
 
-    # 5. Structured Architectural Reasoning
+    # 3. RAM target
+    min_ram = 2.0 if preferred_tier == "Burstable" else 8.0
+    if working_set_gb and working_set_gb > 0:
+        ram_basis = f"hot working set {working_set_gb:.1f} GB x {WORKING_SET_RAM_FACTOR}"
+        target_ram_gib = round(max(min_ram, working_set_gb * WORKING_SET_RAM_FACTOR), 1)
+        headroom_label = f"{WORKING_SET_RAM_FACTOR}x hot working set"
+    else:
+        ram_basis = f"source RAM x {MEMORY_HEADROOM_FACTOR}"
+        target_ram_gib = round(max(min_ram, ram_gb * MEMORY_HEADROOM_FACTOR), 1) if ram_gb > 0 else min_ram
+        headroom_label = f"{MEMORY_HEADROOM_FACTOR}x source RAM"
+
+    # 4. Storage target (unchanged rule: +30% MVCC/WAL headroom, 32 GiB minimum)
+    target_storage_gib = max(32, int(math.ceil(disk_gb * STORAGE_MVCC_OVERHEAD_FACTOR))) if disk_gb > 0 else 32
+
+    # 5. HA: Burstable cannot use zone-redundant HA
+    if preferred_tier == "Burstable":
+        ha_enabled = False
+    elif ha_override is not None:
+        ha_enabled = ha_override
+    else:
+        ha_enabled = is_production
+
+    # 5b. Default path only: if the 1.25x RAM headroom alone forces a bigger SKU (e.g. 64 GB x 1.25 = 80 GiB
+    # jumps 64 -> 128 GiB), size to source RAM 1:1 instead and say so.
+    headroom_note = ""
+    if not (working_set_gb and working_set_gb > 0) and ram_gb > 0:
+        with_headroom = pick_sku(target_vcpus, target_ram_gib, preferred_tier)
+        floor_ram = round(max(min_ram, ram_gb), 1)
+        at_source = pick_sku(target_vcpus, floor_ram, preferred_tier)
+        if with_headroom["memory_gib"] > at_source["memory_gib"]:
+            headroom_note = (
+                f" The {MEMORY_HEADROOM_FACTOR}x headroom ({target_ram_gib:.0f} GiB) would have forced "
+                f"{with_headroom['sku']} ({with_headroom['vcpus']} vCPUs, {with_headroom['memory_gib']} GiB), "
+                f"so RAM is sized to source RAM 1:1 ({floor_ram:.0f} GiB) instead. PostgreSQL usually needs less "
+                "RAM than Db2; confirm with the cache hit ratio and add a hot working set for a firmer number."
+            )
+            target_ram_gib = floor_ram
+            headroom_label = "1.0x source RAM (headroom would jump a SKU)"
+            ram_basis = "source RAM x 1.0"
+
+    # 6. Select SKU
+    recommended_sku = select_azure_sku(target_vcpus, target_ram_gib, preferred_tier)
+    tier_note = ""
+    if preferred_tier == "General Purpose":
+        # Don't buy extra vCPUs just for RAM: if E-series reaches the targets with fewer vCPUs, use it.
+        mo_sku = fit_sku(target_vcpus, target_ram_gib, "Memory Optimized")
+        gp_sku = fit_sku(target_vcpus, target_ram_gib, "General Purpose")
+        if mo_sku and (gp_sku is None or mo_sku["vcpus"] < gp_sku["vcpus"]):
+            recommended_sku = mo_sku
+            preferred_tier = "Memory Optimized"
+            gp_txt = f"{gp_sku['sku']} ({gp_sku['vcpus']} vCPUs)" if gp_sku else "no General Purpose SKU"
+            tier_note = (
+                f" Switched to Memory Optimized: the RAM target ({target_ram_gib:.0f} GiB for {target_vcpus} vCPUs) "
+                f"exceeds the 4 GiB per vCore of General Purpose, and {mo_sku['sku']} ({mo_sku['vcpus']} vCPUs) "
+                f"meets it with fewer vCPUs than {gp_txt}."
+            )
+    elif recommended_sku["tier"] != preferred_tier:
+        tier_note = (
+            f" The workload exceeds the {preferred_tier} range, so {recommended_sku['tier']} is used instead."
+        )
+    fits = recommended_sku["vcpus"] >= target_vcpus and recommended_sku["memory_gib"] >= target_ram_gib
+    capacity_warning = None if fits else (
+        f"Needs {target_vcpus} vCPUs and {target_ram_gib:.0f} GiB RAM, more than the largest catalog SKU "
+        f"({recommended_sku['sku']}: {recommended_sku['vcpus']} vCPUs, {recommended_sku['memory_gib']} GiB). "
+        "Split the workload, use read replicas or an elastic cluster, and validate with a load test."
+    )
+
+    # IOPS: you get the lower of the disk limit and the VM limit
+    disk_iops = free_storage_iops(target_storage_gib)
+    vm_iops_cap = VM_IOPS_CAP.get(recommended_sku["sku"])
+    effective_iops = min(disk_iops, vm_iops_cap) if vm_iops_cap else disk_iops
+    if vm_iops_cap and disk_iops > vm_iops_cap:
+        iops_text = (
+            f"Premium SSD v2 includes {disk_iops:,} free IOPS at {target_storage_gib:,} GiB, but "
+            f"{recommended_sku['sku']} is capped at {vm_iops_cap:,} IOPS, so effective IOPS are {effective_iops:,}. "
+            "Check Disk IOPS Consumed % at peak; if it runs high, move to a larger VM."
+        )
+    elif vm_iops_cap:
+        iops_text = f"Premium SSD v2 includes {disk_iops:,} free IOPS, under the {vm_iops_cap:,} IOPS VM cap, so effective IOPS are {effective_iops:,}."
+    else:
+        iops_text = f"Premium SSD v2 includes {disk_iops:,} free IOPS. Check the Burstable VM IOPS limit for this SKU."
+
+    # 7. Structured architectural reasoning
+    if ha_enabled:
+        ha_mode = "Zone-Redundant High Availability"
+        ha_text = (
+            f"Zone-redundant HA keeps a synchronous standby in another availability zone with automatic "
+            f"failover in {HA_FAILOVER_SECONDS} seconds and no data loss. Standby is not readable and "
+            "does not protect against logical errors such as a dropped table, which replicate to the standby. "
+            "Billing is 2x compute and storage."
+        )
+    elif preferred_tier == "Burstable":
+        ha_mode = "Standalone (Single Zone)"
+        ha_text = "Burstable SKUs do not support zone-redundant HA. Dev/test runs as a single instance."
+    else:
+        ha_mode = "Standalone (Single Zone)"
+        ha_text = "Standalone configuration: a single instance with no standby. Suitable for non-critical workloads."
+
     reasoning = {
         "tier_selection": {
             "tier": recommended_sku["tier"],
             "family": recommended_sku["family"],
-            "justification": tier_reason,
+            "justification": tier_reason + tier_note,
         },
         "compute_sizing": {
             "source_vcpus": vcpus,
@@ -226,35 +289,34 @@ def recommend_azure_postgresql(
             "source_ram_gb": ram_gb,
             "target_ram_gib": target_ram_gib,
             "sku_ram_gib": recommended_sku["memory_gib"],
-            "headroom_factor": f"{int((MEMORY_HEADROOM_FACTOR - 1.0) * 100)}%",
+            "headroom_label": headroom_label,
             "justification": (
                 f"Provisioned {recommended_sku['sku']} provides {recommended_sku['vcpus']} vCPUs and "
-                f"{recommended_sku['memory_gib']} GiB RAM. A {int((MEMORY_HEADROOM_FACTOR - 1.0) * 100)}% "
-                f"memory buffer ({ram_gb:.1f} GB -> {target_ram_gib:.1f} GiB) protects against peak PostgreSQL "
-                "connection overhead and query workspace allocation (work_mem/maintenance_work_mem)."
+                f"{recommended_sku['memory_gib']} GiB RAM. vCPUs are sized from {cpu_basis}. "
+                f"RAM is sized from {ram_basis} ({target_ram_gib:.1f} GiB). Memory is the main driver of "
+                "PostgreSQL cache hit ratio, so keep the working set in RAM." + headroom_note
             ),
         },
         "storage_sizing": {
             "source_disk_gb": disk_gb,
             "target_storage_gib": target_storage_gib,
             "overhead_factor": f"{int((STORAGE_MVCC_OVERHEAD_FACTOR - 1.0) * 100)}%",
-            "baseline_iops": BASELINE_FREE_IOPS,
+            "baseline_iops": disk_iops,
+            "vm_iops_cap": vm_iops_cap,
+            "effective_iops": effective_iops,
+            "iops_justification": iops_text,
             "justification": (
                 f"Target storage is sized at {target_storage_gib:,} GiB incorporating a 30% safety buffer "
                 f"({disk_gb:.1f} GB -> {target_storage_gib:,} GiB). PostgreSQL's Multi-Version Concurrency "
                 "Control (MVCC) creates duplicate row versions on update; this 30% headroom accommodates "
-                "dead tuple accumulation prior to autovacuum, WAL logs, and index reindexing without disk saturation."
+                "dead tuple accumulation prior to autovacuum, WAL logs, and index reindexing without disk saturation. "
+                + iops_text
             ),
         },
         "high_availability": {
             "enabled": ha_enabled,
-            "mode": "Zone-Redundant High Availability" if ha_enabled else "Standalone (Single Zone)",
-            "justification": (
-                "Zone-Redundant HA provides an automatic standby instance in a separate availability zone "
-                "with synchronous replication and automatic failover (<60s). Recommended for production environments."
-                if ha_enabled
-                else "Standalone configuration provides a single-instance deployment suitable for non-critical or development workloads."
-            ),
+            "mode": ha_mode,
+            "justification": ha_text,
         },
     }
 
@@ -268,6 +330,14 @@ def recommend_azure_postgresql(
         "target_storage_gib": target_storage_gib,
         "ha_enabled": ha_enabled,
         "preferred_tier": preferred_tier,
+        "capacity_warning": capacity_warning,
+        "effective_iops": effective_iops,
+        "inputs": {
+            "peak_cpu_pct": peak_cpu_pct or None,
+            "working_set_gb": working_set_gb or None,
+            "force_memory_optimized": force_memory_optimized,
+            "is_production": is_production,
+        },
         "reasoning": reasoning,
     }
 
@@ -280,8 +350,14 @@ def generate_azure_markdown_report(
     """Generates a clean Markdown executive sizing brief for documentation or ticket attachment."""
     sku = azure_rec.get("recommended_sku", {})
     reasoning = azure_rec.get("reasoning", {})
+    compute = reasoning.get("compute_sizing", {})
     app_num = app_info.get("Application Number", "Unknown")
     app_name = app_info.get("Name", "Unknown")
+    warning = ""
+    if azure_rec.get("capacity_warning"):
+        warning += f"\n> **Capacity warning.** {azure_rec['capacity_warning']}\n"
+    if sku.get("tier") == "Burstable":
+        warning += "\n> **Dev/test only.** Burstable is not supported for production. Stop the server off-hours.\n"
 
     md = f"""# Azure Sizing Recommendation: {app_num} - {app_name}
 
@@ -291,8 +367,8 @@ def generate_azure_markdown_report(
 * **Compute Tier:** **{sku.get('tier', '')}** ({sku.get('family', '')})
 * **Target Provisioned Storage:** **{azure_rec.get('target_storage_gib', 0):,} GiB** (incorporates +30% MVCC/WAL headroom)
 * **High Availability Mode:** **{reasoning.get('high_availability', {}).get('mode', '')}**
-* **Included Baseline IOPS:** 3,000 IOPS
-
+* **IOPS (Premium SSD v2 free tier, capped by VM):** {azure_rec.get('effective_iops', 0):,} IOPS
+{warning}
 ---
 
 ## 2. Workload & Sizing Context
@@ -309,8 +385,8 @@ def generate_azure_markdown_report(
 ### 1. Compute Tier Selection Rationale
 {reasoning.get('tier_selection', {}).get('justification', '')}
 
-### 2. Compute & Memory Headroom Rationale (+25%)
-{reasoning.get('compute_sizing', {}).get('justification', '')}
+### 2. Compute & Memory Sizing Rationale ({compute.get('headroom_label', '')})
+{compute.get('justification', '')}
 
 ### 3. Storage Sizing & MVCC Bloat Headroom (+30%)
 {reasoning.get('storage_sizing', {}).get('justification', '')}

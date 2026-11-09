@@ -309,11 +309,11 @@ def generate_app_excel_bytes(app_info, servers_df, rollup, azure_rec=None, **kwa
                 
                 {"Category": "Compute Sizing", "Attribute": "Recommended SKU", "Specification": sku.get("sku", "")},
                 {"Category": "Compute Sizing", "Attribute": "Compute Tier", "Specification": f"{sku.get('tier', '')} ({sku.get('family', '')})"},
-                {"Category": "Compute Sizing", "Attribute": "Provisioned vCPUs", "Specification": f"{sku.get('vcpus', 0)} cores (1.0 core ratio)"},
-                {"Category": "Compute Sizing", "Attribute": "Target Memory", "Specification": f"{sku.get('memory_gib', 0)} GiB (incorporates +25% headroom)"},
+                {"Category": "Compute Sizing", "Attribute": "Provisioned vCPUs", "Specification": f"{sku.get('vcpus', 0)} cores (sized from peak CPU if provided, else allocated cores)"},
+                {"Category": "Compute Sizing", "Attribute": "Target Memory", "Specification": f"{sku.get('memory_gib', 0)} GiB (sized from {reasoning.get('compute_sizing', {}).get('headroom_label', 'source RAM')})"},
                 
                 {"Category": "Storage Sizing", "Attribute": "Provisioned Storage", "Specification": f"{azure_rec.get('target_storage_gib', 0):,} GiB (incorporates +30% MVCC/WAL headroom)"},
-                {"Category": "Storage Sizing", "Attribute": "Baseline Free IOPS", "Specification": "3,000 IOPS included"},
+                {"Category": "Storage Sizing", "Attribute": "Effective IOPS", "Specification": f"{azure_rec.get('effective_iops', 3000):,} IOPS (Premium SSD v2 free tier, capped by the VM limit)"},
                 
                 {"Category": "High Availability", "Attribute": "Resilience Architecture", "Specification": reasoning.get("high_availability", {}).get("mode", "")},
                 
