@@ -20,11 +20,12 @@ LESSONS = [
     ("Connections", ":material/cable:"),
     ("HA and backups", ":material/shield:"),
     ("Size it yourself", ":material/calculate:"),
+    ("Scale up or out", ":material/open_in_full:"),
     ("Watch and resize", ":material/monitoring:"),
     ("Cut the bill", ":material/savings:"),
     ("Launch checklist", ":material/checklist:"),
 ]
-QUIZ_KEYS = {"Start here": ["start"], "Pick a tier": ["tier"], "Burstable trap": ["burst"], "Storage": ["storage", "storage2"], "Connections": ["conn"], "HA and backups": ["ha"], "Size it yourself": ["size"], "Watch and resize": ["watch"], "Cut the bill": ["cost"], "Launch checklist": ["checklist"]}
+QUIZ_KEYS = {"Start here": ["start"], "Pick a tier": ["tier"], "Burstable trap": ["burst"], "Storage": ["storage", "storage2"], "Connections": ["conn"], "HA and backups": ["ha"], "Size it yourself": ["size"], "Scale up or out": ["scale"], "Watch and resize": ["watch"], "Cut the bill": ["cost"], "Launch checklist": ["checklist"]}
 NAMES = [n for n, _ in LESSONS]
 ICONS = dict(LESSONS)
 
@@ -71,6 +72,80 @@ CHECKLIST = [
     "Alerts on CPU, memory, IOPS, storage and connections from day one",
     "Reservation only after 30 to 60 days of stable metrics",
 ]
+
+
+L = "https://learn.microsoft.com/en-us/azure/postgresql/"  # Microsoft Learn base URL
+
+SOURCES = {
+    "Start here": [
+        ("third-party", "Single Server retired March 28, 2025; unmigrated servers disabled (Microsoft Q&A staff answer, not re-checked here)", None),
+    ],
+    "Pick a tier": [
+        ("confirmed", "Burstable has no HA and no read replicas; only General Purpose and Memory Optimized do", L + "high-availability/concepts-high-availability"),
+        ("confirmed", "D2ds_v5 = 2 vCores / 8 GiB; D4ds_v5 = 4 / 16 (4 GiB per vCore)", L + "compute-storage/concepts-compute"),
+        ("nuance", "E-series RAM per vCore (6.75 to 9.5 GiB) and the 24/7 support wording come from the research file, not re-checked", None),
+    ],
+    "Burstable trap": [
+        ("confirmed", "Burstable suits low-cost dev and low-concurrency use; credits can run out and cause timeouts", L + "compute-storage/concepts-compute"),
+        ("third-party", "B1ms/B2s/B2ms baselines (20/40/60%) are from Azure's B-series VM docs via the research file", None),
+        ("third-party", "$220 vs $65 per sustained vCore is a Datapace estimate (East US), and the regional Burstable block is an unofficial forum answer", None),
+    ],
+    "Storage": [
+        ("confirmed", "SSD v2: 3,000 IOPS / 125 MB/s free up to 399 GiB; 12,000 / 500 MB/s from 400 GiB; up to 80,000 IOPS; IOPS and throughput adjustable separately", L + "compute-storage/concepts-storage-premium-ssd-v2"),
+        ("confirmed", "VM caps: D2ds_v5 3,750, D4ds_v5 6,400, D16ds_v5 25,600, D32ds_v5 51,200. Compute size limits what storage can deliver", L + "compute-storage/concepts-compute"),
+        ("confirmed", "Storage can't shrink; read-only near 95% full or under 5 GiB free; autogrow doubles size and cost", L + "compute-storage/concepts-storage"),
+        ("nuance", "Microsoft words the read-only rule inconsistently (\"or\" vs \"whichever is more\"). Alert early. SSD v2 autogrow was still preview", L + "configure-maintain/concepts-limits"),
+        ("nuance", "Premium SSD v1 tier IOPS (500/1,100/2,300/5,000/7,500) come from the research file and Azure disk docs, not the PostgreSQL pages", None),
+    ],
+    "Connections": [
+        ("confirmed", "Defaults: 50 (B1ms), 429 (B2s), 859 (2 vCore), 1,718 (4), 3,437 (8), 5,000 (16+). 15 reserved. Not changed by scaling the SKU", L + "configure-maintain/concepts-limits"),
+        ("confirmed", "PgBouncer on port 6432, same hostname; pool size 50; transaction mode default; max_client_conn 5,000", L + "connectivity/concepts-pgbouncer"),
+        ("nuance", "The 'database sees at most ~50' shortcut in the widget is simplified: it is 50 per user/database pair", None),
+    ],
+    "HA and backups": [
+        ("confirmed", "SLA: zone-redundant 99.99%, same-zone 99.95%, no HA 99.9%", L + "high-availability/concepts-high-availability"),
+        ("confirmed", "Backups 7 days default, up to 35", L + "backup-restore/concepts-backup-restore"),
+        ("nuance", "Microsoft's own pages disagree on whether backups are zone-redundant or local when HA is off. Confirm in the portal", "https://learn.microsoft.com/en-us/azure/reliability/reliability-database-postgresql"),
+        ("confirmed", "Burstable has no HA. Read replicas: up to 5, 30 with cascading (PostgreSQL 14+), asynchronous", L + "read-replica/concepts-read-replicas"),
+        ("third-party", "The $217/month geo-backup example and the \"$1,000 restore\" anecdote are third-party/forum figures", None),
+    ],
+    "Size it yourself": [
+        ("nuance", "The 65% CPU target and 1.5x working-set rule are engineering rules of thumb, not Microsoft limits. Load-test", None),
+        ("third-party", "Prices use Bytebase/Datapace estimates and an East US storage proxy. Use the Azure calculator", None),
+    ],
+    "Scale up or out": [
+        ("confirmed", "Near-zero-downtime scaling is skipped when scaling from/to 1 to 2 vCore Burstable, or with capacity limits, replicas, unlogged tables or too few subnet IPs. The fallback restart takes roughly 2 to 10 minutes", L + "scale/concepts-scaling-resources"),
+        ("confirmed", "Up to 5 read replicas (30 with cascading, PG 14+), asynchronous, can be cross-region; none on Burstable", L + "read-replica/concepts-read-replicas"),
+    ],
+    "Watch and resize": [
+        ("nuance", "All thresholds (75% CPU, 90% memory, 85% IOPS, 80% storage) are suggested starting points, not Microsoft limits", None),
+    ],
+    "Cut the bill": [
+        ("confirmed", "Microsoft's cost guide: reservations save up to about 40% (1-year) and 60% (3-year)", L + "configure-maintain/how-to-cost-optimization"),
+        ("nuance", "Other Microsoft pages quote higher maximums (47%/64%/65%). That Burstable can't be reserved was not re-verified", None),
+        ("third-party", "Extended-support fees for PostgreSQL 11 to 13 (from Sept 1, 2026) are from third-party price readings. Verify on the pricing page", None),
+    ],
+    "Launch checklist": [],
+}
+STATUS = {
+    "confirmed": ("Confirmed", "green", ":material/verified:"),
+    "nuance": ("Nuance", "orange", ":material/info:"),
+    "third-party": ("Unverified", "gray", ":material/help:"),
+}
+
+
+def sources_box(name: str) -> None:
+    rows = SOURCES.get(name, [])
+    if not rows:
+        return
+    n_ok = sum(1 for k, _, _ in rows if k == "confirmed")
+    with st.expander(f"How sure are we? {n_ok} of {len(rows)} claims checked against Microsoft Learn", icon=":material/fact_check:"):
+        for kind, claim, url in rows:
+            label, color, icon = STATUS[kind]
+            c1, c2 = st.columns([1, 5], vertical_alignment="center")
+            c1.badge(label, icon=icon, color=color)
+            c2.markdown(f"{claim}" + (f" ([source]({url}))" if url else ""))
+        st.caption("Checked November 9, 2026. Prices and preview features change. Full log is at the end of the Full reference tab.")
 
 
 def md(text: str) -> None:
@@ -315,14 +390,14 @@ def lesson_storage() -> None:
 
     billed = next(s for s, _ in V1_TIERS if size <= s)
     v1_disk = next(i for s, i in V1_TIERS if size <= s)
-    v2_disk = (3000 if size < 400 else 12000) + extra
+    v2_disk = min((3000 if size < 400 else 12000) + extra, 500 * size, 80000)  # 500 IOPS per GiB, max 80,000
     if billed != size:
         st.caption(f"Premium SSD v1 only comes in fixed sizes, so {size:,} GiB is billed as **{billed:,} GiB**.")
 
     st.markdown("##### STEP 3 · Read the result")
     for label, disk_iops, how in [
         ("Premium SSD (v1)", v1_disk, "IOPS come from disk size. To get more, you must buy a bigger disk."),
-        ("Premium SSD v2", v2_disk, f"3,000 or 12,000 free, plus {extra:,} bought. Size and IOPS are separate."),
+        ("Premium SSD v2", v2_disk, f"3,000 free (12,000 from 400 GiB), plus {extra:,} bought. Limit: 500 IOPS per GiB, max 80,000. Size and IOPS are set separately."),
     ]:
         iops_result(label, disk_iops, vm_cap, vm, how)
 
@@ -331,7 +406,9 @@ def lesson_storage() -> None:
         "**Three storage rules**\n"
         "- Default to **Premium SSD v2** for new servers: 3,000 IOPS free vs 500 to 1,100 on v1 at 128 to 256 GiB.\n"
         "- Storage **only grows**. Start modest.\n"
-        "- Server goes **read-only at 95% full**."
+        "- Server goes **read-only at 95% full** (or under 5 GiB free). Alert at 80%.\n"
+        "- v2 allows about **4 IOPS/throughput changes per 24 hours**. Plan changes, don't thrash.\n"
+        "- **Autogrow doubles** disk size and cost each time, and doesn't fire during heavy WAL."
     )
     quiz(
         "storage",
@@ -429,6 +506,9 @@ def lesson_ha() -> None:
     md(
         "**Backups in 4 lines**\n"
         "- 7 days by default, up to 35.\n"
+        "- **Burstable has no HA at all.** Move to General Purpose for HA.\n"
+        "- Microsoft's docs disagree on whether backups are zone-redundant or local without HA. Check at creation.\n"
+        "- **Read replicas** are a different tool: asynchronous, readable, up to 5 per primary (30 cascading), each billed as a full server.\n"
         "- Backup storage up to 100% of provisioned storage is free.\n"
         "- **Geo-redundant backup can only be chosen at server creation.** Decide up front.\n"
         "- A point-in-time restore makes a *new* server, and you pay for it."
@@ -492,6 +572,57 @@ def lesson_size() -> None:
     st.session_state.done.add("size")
 
 
+def lesson_scale() -> None:
+    with st.container(border=True):
+        st.caption("First, scale up vs scale out")
+        md(
+            "- **Scale up:** a bigger single server (more vCores/RAM). Simple. Fixes CPU/RAM limits and slow single queries.\n"
+            "- **Scale out:** add **read replicas**: extra copies that serve reads. Fixes read load, not write load.\n"
+            "- **Replication lag:** replicas are asynchronous, so they can be slightly behind the primary."
+        )
+    md("Pick your symptom to see the next move. Order of operations: tune queries, add PgBouncer, scale up, then replicas.")
+    symptom = st.selectbox(
+        "What are you seeing?",
+        [
+            "CPU high, mostly from writes",
+            "One query is slow",
+            "Reads are 70 to 80% of the load",
+            "Cache hit ratio below 99%, CPU fine",
+            "'too many clients' errors",
+            "Need more write capacity than one server",
+        ],
+        key="scale_symptom",
+    )
+    move, why = {
+        "CPU high, mostly from writes": ("Scale up (more vCores)", "Replicas don't help writes. Check `pg_stat_statements` for bad queries first."),
+        "One query is slow": ("Fix the query/index, then scale up if needed", "More replicas won't speed one query. A bigger VM may."),
+        "Reads are 70 to 80% of the load": ("Add 1 or 2 read replicas", "Your app must tolerate lag and route reads separately. Each replica is billed as a full server. Not available on Burstable."),
+        "Cache hit ratio below 99%, CPU fine": ("Move to Memory Optimized (E-series)", "More RAM per vCore without paying for CPU you don't need."),
+        "'too many clients' errors": ("Turn on PgBouncer", "Pool first, scale RAM second. Don't raise max_connections."),
+        "Need more write capacity than one server": ("Look at elastic clusters (Citus-based sharding)", "Only for genuine write scale-out. Validate with a load test."),
+    }[symptom]
+    with st.container(border=True):
+        st.markdown(f"#### {move}")
+        md(why)
+    with st.expander("When scale-up is NOT near-zero downtime", icon=":material/warning:"):
+        md(
+            "Scaling normally takes **under 30 seconds** of disconnect. Microsoft says it falls back to a plain "
+            "restart (**roughly 2 to 10 minutes**) when:\n"
+            "- you scale from or to a **1 or 2 vCore Burstable** size\n"
+            "- the region lacks capacity or you hit a quota\n"
+            "- the server has replicas or **unlogged tables**\n"
+            "- a VNet subnet doesn't have enough free IPs\n\n"
+            "Plan resizes for a quiet window and make sure your app retries connections."
+        )
+    quiz(
+        "scale",
+        "Reads are 80% of load, writes keep CPU at 40%. Best next step?",
+        ["Bigger primary only", "Add a read replica and route reads to it", "Switch to Burstable"],
+        1,
+        "Yes. Reads can move to an async replica. Check your app tolerates replication lag.",
+    )
+
+
 def lesson_watch() -> None:
     with st.container(border=True):
         st.caption("First, what is right-sizing?")
@@ -500,7 +631,7 @@ def lesson_watch() -> None:
             "Azure Monitor records metrics every minute and keeps 30 days. "
             "Set alerts on the five below from day one.\n\n"
             "- **p95:** the value 95% of the time stays under. Ignores rare spikes, shows the real busy level.\n"
-            "- **Scale up:** a bigger server. Takes under 30 s in the near-zero-downtime case.\n"
+            "- **Scale up:** a bigger server. Often under 30 s, but can fall back to a 2 to 10 minute restart (see 'Scale up or out').\n"
             "- **Scale down (right-size):** you pay for idle capacity. Check after 2 to 4 weeks."
         )
     md("Pick a metric, set what you see, and read the advice.")
@@ -568,7 +699,7 @@ def lesson_cost() -> None:
     md(
         "**Biggest levers, in order**\n"
         "1. Stop non-prod servers off-hours (about 70% less compute). Auto-restarts after 7 days.\n"
-        "2. Reserve steady prod compute. **Right-size first.**\n"
+        "2. Reserve steady prod compute. **Right-size first.** Microsoft's cost guide says up to ~40% (1-year) and ~60% (3-year); other pages quote more.\n"
         "3. No HA or geo-backup on dev/staging.\n"
         "4. Premium SSD v2 so you don't buy capacity just for IOPS."
     )
@@ -589,6 +720,7 @@ RENDER = {
     "Connections": lesson_conn,
     "HA and backups": lesson_ha,
     "Size it yourself": lesson_size,
+    "Scale up or out": lesson_scale,
     "Watch and resize": lesson_watch,
     "Cut the bill": lesson_cost,
     "Launch checklist": lesson_checklist,
@@ -649,6 +781,7 @@ with st.container(width=880):
         idx = NAMES.index(lesson)
         st.subheader(f"{idx + 1}. {lesson}")
         RENDER[lesson]()
+        sources_box(lesson)
 
         prev_col, next_col = st.columns(2)
         if idx > 0:

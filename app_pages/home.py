@@ -262,28 +262,54 @@ else:
                             ha_enabled = "Zone-Redundant" in ha_option
 
                     with st.expander("Advanced sizing inputs (optional)", icon=":material/tune:"):
-                        adv_c1, adv_c2, adv_c3 = st.columns(3)
-                        with adv_c1:
+                        st.caption(
+                            "Leave a field blank to use the default estimate. Each number you add replaces a guess with a "
+                            "measurement from your own workload, and the result below shows what it changed."
+                        )
+                        k = selected_app_num
+                        t_cpu, t_mem, t_sto, t_conn = st.tabs(["CPU", "Memory", "Storage and IOPS", "Connections"])
+                        with t_cpu:
                             peak_cpu = st.number_input(
-                                "Peak CPU utilization (%)",
-                                min_value=0.0, max_value=100.0, value=0.0, step=5.0,
-                                key=f"peak_cpu_{selected_app_num}",
-                                help="Observed peak CPU. 0 = unknown, size from allocated cores."
+                                "Peak CPU utilization of the source (%)", min_value=1.0, max_value=100.0, value=None, step=5.0,
+                                placeholder="Unknown", key=f"peak_cpu_{k}",
+                                help="Busiest-hour CPU on the source servers. vCores = source cores x peak% / 65% target, so a server that peaks at 30% needs far fewer Azure cores than it has today.",
                             )
-                        with adv_c2:
+                            st.caption("Blank: size from allocated source cores 1:1. Where to find it: Db2 monitoring, OS metrics or your APM.")
+                        with t_mem:
                             working_set = st.number_input(
-                                "Hot working set (GB)",
-                                min_value=0.0, value=0.0, step=1.0,
-                                key=f"ws_{selected_app_num}",
-                                help="Data actively used. 0 = unknown, size from source RAM."
+                                "Hot working set (GB)", min_value=1.0, value=None, step=1.0, placeholder="Unknown", key=f"ws_{k}",
+                                help="Tables and indexes touched in a normal hour. RAM target = 1.5 x this.",
                             )
-                        with adv_c3:
-                            force_mo = st.toggle(
-                                "Force Memory Optimized",
-                                value=False,
-                                key=f"force_mo_{selected_app_num}",
-                                help="Use E-series even when the RAM:vCPU ratio is 4:1 or lower."
+                            mem_profile = st.segmented_control(
+                                "Memory profile", ["Auto", "General Purpose", "Memory Optimized"], default="Auto", required=True,
+                                key=f"memprof_{k}",
+                                help="Auto picks E-series only when it reaches the RAM target with fewer vCores. General Purpose = 4 GiB/vCore. Memory Optimized = 8 GiB/vCore.",
                             )
+                            st.caption("Blank working set: size from source RAM (x1.25, or 1:1 when the headroom would jump a SKU).")
+                        with t_sto:
+                            s1, s2 = st.columns(2)
+                            growth = s1.number_input(
+                                "Data growth per month (GB)", min_value=0.0, value=None, step=1.0, placeholder="Unknown", key=f"growth_{k}",
+                                help="Storage is sized for 12 months of growth, then +30% for MVCC/WAL/bloat. Storage can never shrink.",
+                            )
+                            peak_iops = s2.number_input(
+                                "Peak IOPS observed", min_value=1, value=None, step=500, placeholder="Unknown", key=f"iops_{k}",
+                                help="Busiest-hour disk IOPS on the source. Provisioned at peak + 30%. May raise the VM size (VM caps) or add paid SSD v2 IOPS.",
+                            )
+                            st.caption("Effective IOPS = the lower of the disk's IOPS and the VM's cap. Learn how in the Research & guide page, Storage lesson.")
+                        with t_conn:
+                            c1, c2, c3 = st.columns(3)
+                            n_inst = c1.number_input("App instances", min_value=1, value=None, step=1, placeholder="Unknown", key=f"inst_{k}")
+                            pool_sz = c2.number_input("Pool size each", min_value=1, value=None, step=1, placeholder="Unknown", key=f"pool_{k}", help="Keep app pools small: 5 to 20.")
+                            other_conn = c3.number_input("Workers + admin tools", min_value=0, value=None, step=1, placeholder="0", key=f"otherconn_{k}")
+                            st.caption("Total client connections = instances x pool + others. Checked against the server's max_connections.")
+                        growth = growth or None
+                        client_conns = int(n_inst * pool_sz + (other_conn or 0)) if n_inst and pool_sz else None
+                        n_given = sum(v is not None for v in [peak_cpu, working_set, growth, peak_iops, client_conns]) + (mem_profile != "Auto")
+                        adv_args = dict(
+                            peak_cpu_pct=peak_cpu, working_set_gb=working_set, memory_profile=mem_profile,
+                            growth_gb_per_month=growth, peak_iops=peak_iops, client_connections=client_conns,
+                        )
 
                     # Sizing Rollup for filtered servers
                     filt_vcpus = float(filtered_servers_df["vCPUs"].sum())
@@ -300,9 +326,11 @@ else:
                         source_engine=source_engine,
                         is_production=is_prod_workload,
                         ha_override=ha_enabled,
-                        peak_cpu_pct=peak_cpu,
-                        working_set_gb=working_set,
-                        force_memory_optimized=force_mo
+                        **adv_args
+                    )
+                    baseline_rec = recommend_azure_postgresql(
+                        vcpus=filt_vcpus, ram_gb=filt_ram, disk_gb=filt_disk,
+                        source_engine=source_engine, is_production=is_prod_workload, ha_override=ha_enabled,
                     )
 
                     sku_meta = azure_rec["recommended_sku"]
@@ -342,9 +370,21 @@ else:
                         rec_m2.metric("Target Memory", f"{sku_meta['memory_gib']} GiB", f"{azure_rec['reasoning']['compute_sizing']['headroom_label']} ({filt_ram:.1f} GB src)")
                         rec_m3.metric("Provisioned Storage", f"{azure_rec['target_storage_gib']:,} GiB", f"+30% MVCC/WAL ({filt_disk:.1f} GB src)")
                         rec_m4.metric("High availability", "Zone-Redundant" if azure_rec["ha_enabled"] else "Standalone", "Sync replication" if azure_rec["ha_enabled"] else "Single zone")
+                        st.progress(n_given / 6, text=f"Sizing uses {n_given} of 6 measured inputs. The rest are default estimates.")
+                        if n_given:
+                            b, a = baseline_rec, azure_rec
+                            if b["recommended_sku"]["sku"] != a["recommended_sku"]["sku"]:
+                                st.info(f"Your inputs moved the SKU from `{b['recommended_sku']['sku']}` to `{a['recommended_sku']['sku']}`.", icon=":material/compare_arrows:")
+                            else:
+                                st.caption(f"Your inputs kept the SKU at `{a['recommended_sku']['sku']}`. Storage ({b['target_storage_gib']:,} to {a['target_storage_gib']:,} GiB) and IOPS notes may still differ.")
+                        if azure_rec.get("extra_iops_to_buy"):
+                            st.caption(f":material/shopping_cart: Buy about **{azure_rec['extra_iops_to_buy']:,} extra IOPS** on Premium SSD v2 (billed separately) to cover peak + 30%.")
+                        if azure_rec.get("connections"):
+                            cn = azure_rec["connections"]
+                            (st.warning if cn["pct"] > 80 else st.success)(cn["message"], icon=":material/cable:")
                         if azure_rec.get("capacity_warning"):
                             st.error(azure_rec["capacity_warning"], icon=":material/error:")
-                        st.caption(f":material/speed: Effective IOPS: **{azure_rec['effective_iops']:,}** (lower of the disk's free IOPS and the VM cap)")
+                        st.caption(f":material/speed: Effective IOPS: **{azure_rec['effective_iops']:,}** (lower of the disk's free IOPS and the VM cap)" + ("" if azure_rec["reasoning"]["storage_sizing"]["vm_iops_cap"] else ". VM cap for this SKU is not in our data, so it may be lower."))
                         if sku_meta["tier"] == "Burstable":
                             st.warning("Dev/test only. Burstable is not supported for production. Stop the server off-hours.", icon=":material/warning:")
 
@@ -392,7 +432,7 @@ else:
                                     ha_override=ha_enabled,
                                     peak_cpu_pct=peak_cpu,
                                     working_set_gb=working_set,
-                                    force_memory_optimized=force_mo
+                                    memory_profile=mem_profile
                                 )
                                 s_sku = s_rec["recommended_sku"]
                                 indiv_rows.append({

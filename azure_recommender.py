@@ -51,14 +51,13 @@ BASELINE_FREE_IOPS = 3000           # Premium SSD v2 free IOPS under 400 GiB
 LARGE_DISK_FREE_IOPS = 12000        # Premium SSD v2 free IOPS at 400 GiB and above
 LARGE_DISK_GIB = 400
 
-# VM-level IOPS ceilings (research: effective IOPS = min(disk, VM cap)). Burstable caps are not listed here.
+# VM-level IOPS ceilings (effective IOPS = min(disk, VM cap)). Only values found in azure_research.md or
+# Microsoft docs are listed; SKUs missing here (Burstable, D48, E4 to E48) have no cap applied and are flagged.
 VM_IOPS_CAP = {
     "Standard_D2ds_v5": 3750, "Standard_D4ds_v5": 6400, "Standard_D8ds_v5": 12800,
-    "Standard_D16ds_v5": 25600, "Standard_D32ds_v5": 51200, "Standard_D48ds_v5": 76800,
+    "Standard_D16ds_v5": 25600, "Standard_D32ds_v5": 51200,
     "Standard_D64ds_v5": 80000, "Standard_D96ds_v5": 80000,
-    "Standard_E2ds_v5": 3200, "Standard_E4ds_v5": 6400, "Standard_E8ds_v5": 12800,
-    "Standard_E16ds_v5": 25600, "Standard_E32ds_v5": 51200, "Standard_E48ds_v5": 76800,
-    "Standard_E64ds_v5": 80000,
+    "Standard_E2ds_v5": 3200, "Standard_E64ds_v5": 80000,
 }
 HA_FAILOVER_SECONDS = "60-120"
 
@@ -79,14 +78,20 @@ def fit_sku(target_vcpus: int, target_ram_gib: float, tier: str) -> Optional[Dic
     return next((x for x in skus if x["vcpus"] >= target_vcpus and x["memory_gib"] >= target_ram_gib), None)
 
 
-def pick_sku(target_vcpus: int, target_ram_gib: float, tier: str) -> Dict[str, Any]:
+def pick_sku(target_vcpus: int, target_ram_gib: float, tier: str, allow_mo: bool = True) -> Dict[str, Any]:
     """Best-fit SKU, preferring Memory Optimized when it needs fewer vCPUs than General Purpose."""
     sku = select_azure_sku(target_vcpus, target_ram_gib, tier)
-    if tier == "General Purpose":
+    if tier == "General Purpose" and allow_mo:
         mo, gp = fit_sku(target_vcpus, target_ram_gib, "Memory Optimized"), fit_sku(target_vcpus, target_ram_gib, "General Purpose")
         if mo and (gp is None or mo["vcpus"] < gp["vcpus"]):
             return mo
     return sku
+
+
+def default_max_connections(memory_gib: float) -> int:
+    """Azure default max_connections by RAM (research: ~107 per GiB, 25 per GiB at <=2 GiB, cap 5,000)."""
+    known = {2: 50, 4: 429, 8: 859, 16: 1718, 32: 3437}
+    return known.get(int(memory_gib), min(5000, int(memory_gib * 107.4)))
 
 
 def free_storage_iops(storage_gib: int) -> int:
@@ -127,6 +132,10 @@ def recommend_azure_postgresql(
     peak_cpu_pct: Optional[float] = None,
     working_set_gb: Optional[float] = None,
     force_memory_optimized: bool = False,
+    memory_profile: str = "Auto",
+    growth_gb_per_month: Optional[float] = None,
+    peak_iops: Optional[float] = None,
+    client_connections: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Computes Azure Database for PostgreSQL Flexible Server architectural sizing recommendations.
@@ -141,9 +150,15 @@ def recommend_azure_postgresql(
     - peak_cpu_pct: optional observed peak CPU utilization (0-100). If set, vCores = vcpus * peak / 65%
     - working_set_gb: optional hot working set. If set, RAM target = working set * 1.5
     - force_memory_optimized: force the Memory Optimized (E-series) tier for production
+    - memory_profile: "Auto" (default), "General Purpose" (never switch to E-series) or "Memory Optimized"
+    - growth_gb_per_month: expected data growth; storage is sized for 12 months of it
+    - peak_iops: observed peak IOPS; provisioned at peak + 30% (VM may be bumped, extra SSD v2 IOPS bought)
+    - client_connections: total app connections (instances x pool + extras); checked against max_connections
     """
     # 1. Tier selection (research: GP default; E-series only for large working sets; Burstable for non-prod)
     ratio = (ram_gb / vcpus) if vcpus > 0 else 0.0
+    force_mo = force_memory_optimized or memory_profile == "Memory Optimized"
+    lock_gp = memory_profile == "General Purpose"
     if not is_production:
         preferred_tier = "Burstable"
         tier_reason = (
@@ -151,12 +166,12 @@ def recommend_azure_postgresql(
             "recommended for production, has no zone-redundant HA, no read replicas and no reservations. "
             "Stop the server off-hours to reduce cost."
         )
-    elif force_memory_optimized or ratio > MEMORY_RATIO_THRESHOLD:
+    elif force_mo or (ratio > MEMORY_RATIO_THRESHOLD and not lock_gp):
         preferred_tier = "Memory Optimized"
         reason_bits = []
         if ratio > MEMORY_RATIO_THRESHOLD:
             reason_bits.append(f"source RAM:vCPU ratio is {ratio:.1f}:1 (above {MEMORY_RATIO_THRESHOLD:.0f}:1)")
-        if force_memory_optimized:
+        if force_mo:
             reason_bits.append("Memory Optimized was selected manually")
         tier_reason = (
             "Memory Optimized (E-series, 1:8) is used because " + " and ".join(reason_bits) + ". "
@@ -167,6 +182,7 @@ def recommend_azure_postgresql(
         tier_reason = (
             f"General Purpose (D-series v5, 1:4) is the default for production. Source RAM:vCPU ratio is "
             f"{ratio:.1f}:1, so no memory-heavy profile is needed."
+            + (" General Purpose was selected manually, so E-series is never substituted." if lock_gp else "")
         )
 
     # 2. vCPU target
@@ -190,7 +206,9 @@ def recommend_azure_postgresql(
         headroom_label = f"{MEMORY_HEADROOM_FACTOR}x source RAM"
 
     # 4. Storage target (unchanged rule: +30% MVCC/WAL headroom, 32 GiB minimum)
-    target_storage_gib = max(32, int(math.ceil(disk_gb * STORAGE_MVCC_OVERHEAD_FACTOR))) if disk_gb > 0 else 32
+    growth_12m = (growth_gb_per_month or 0.0) * 12
+    sized_disk = disk_gb + growth_12m
+    target_storage_gib = max(32, int(math.ceil(sized_disk * STORAGE_MVCC_OVERHEAD_FACTOR))) if sized_disk > 0 else 32
 
     # 5. HA: Burstable cannot use zone-redundant HA
     if preferred_tier == "Burstable":
@@ -204,9 +222,9 @@ def recommend_azure_postgresql(
     # jumps 64 -> 128 GiB), size to source RAM 1:1 instead and say so.
     headroom_note = ""
     if not (working_set_gb and working_set_gb > 0) and ram_gb > 0:
-        with_headroom = pick_sku(target_vcpus, target_ram_gib, preferred_tier)
+        with_headroom = pick_sku(target_vcpus, target_ram_gib, preferred_tier, not lock_gp)
         floor_ram = round(max(min_ram, ram_gb), 1)
-        at_source = pick_sku(target_vcpus, floor_ram, preferred_tier)
+        at_source = pick_sku(target_vcpus, floor_ram, preferred_tier, not lock_gp)
         if with_headroom["memory_gib"] > at_source["memory_gib"]:
             headroom_note = (
                 f" The {MEMORY_HEADROOM_FACTOR}x headroom ({target_ram_gib:.0f} GiB) would have forced "
@@ -221,7 +239,7 @@ def recommend_azure_postgresql(
     # 6. Select SKU
     recommended_sku = select_azure_sku(target_vcpus, target_ram_gib, preferred_tier)
     tier_note = ""
-    if preferred_tier == "General Purpose":
+    if preferred_tier == "General Purpose" and not lock_gp:
         # Don't buy extra vCPUs just for RAM: if E-series reaches the targets with fewer vCPUs, use it.
         mo_sku = fit_sku(target_vcpus, target_ram_gib, "Memory Optimized")
         gp_sku = fit_sku(target_vcpus, target_ram_gib, "General Purpose")
@@ -245,20 +263,62 @@ def recommend_azure_postgresql(
         "Split the workload, use read replicas or an elastic cluster, and validate with a load test."
     )
 
-    # IOPS: you get the lower of the disk limit and the VM limit
-    disk_iops = free_storage_iops(target_storage_gib)
+    # IOPS: provision peak + 30%, then effective = min(disk, VM cap)
+    iops_need = int(math.ceil(peak_iops * 1.3)) if peak_iops and peak_iops > 0 else None
+    iops_bump = ""
+    if iops_need and (VM_IOPS_CAP.get(recommended_sku["sku"]) or 10**9) < iops_need:
+        bigger = sorted(
+            (x for x in SKU_CATALOG if x["tier"] == recommended_sku["tier"]
+             and x["vcpus"] >= recommended_sku["vcpus"] and x["memory_gib"] >= recommended_sku["memory_gib"]
+             and VM_IOPS_CAP.get(x["sku"], 0) >= iops_need),
+            key=lambda x: (x["vcpus"], x["memory_gib"]),
+        )
+        if bigger:
+            old = recommended_sku
+            recommended_sku = bigger[0]
+            iops_bump = (
+                f" Peak {peak_iops:,.0f} IOPS + 30% = {iops_need:,} exceeds {old['sku']}'s VM cap "
+                f"({VM_IOPS_CAP.get(old['sku']):,}), so the SKU moved up to {recommended_sku['sku']}."
+            )
+    free_iops = free_storage_iops(target_storage_gib)
+    extra_iops = 0
+    if iops_need and iops_need > free_iops:
+        extra_iops = max(0, min(iops_need, 80000, 500 * target_storage_gib) - free_iops)
+    disk_iops = free_iops + extra_iops
     vm_iops_cap = VM_IOPS_CAP.get(recommended_sku["sku"])
     effective_iops = min(disk_iops, vm_iops_cap) if vm_iops_cap else disk_iops
     if vm_iops_cap and disk_iops > vm_iops_cap:
         iops_text = (
-            f"Premium SSD v2 includes {disk_iops:,} free IOPS at {target_storage_gib:,} GiB, but "
+            f"Premium SSD v2 gives {disk_iops:,} IOPS at {target_storage_gib:,} GiB, but "
             f"{recommended_sku['sku']} is capped at {vm_iops_cap:,} IOPS, so effective IOPS are {effective_iops:,}. "
             "Check Disk IOPS Consumed % at peak; if it runs high, move to a larger VM."
         )
     elif vm_iops_cap:
-        iops_text = f"Premium SSD v2 includes {disk_iops:,} free IOPS, under the {vm_iops_cap:,} IOPS VM cap, so effective IOPS are {effective_iops:,}."
+        iops_text = f"Premium SSD v2 gives {disk_iops:,} IOPS, under the {vm_iops_cap:,} IOPS VM cap, so effective IOPS are {effective_iops:,}."
     else:
-        iops_text = f"Premium SSD v2 includes {disk_iops:,} free IOPS. Check the Burstable VM IOPS limit for this SKU."
+        iops_text = f"Premium SSD v2 gives {disk_iops:,} IOPS. The VM IOPS cap for {recommended_sku['sku']} is not in the research data; look it up in Microsoft's compute table, as effective IOPS can be lower."
+    if extra_iops:
+        iops_text += f" Peak {peak_iops:,.0f} IOPS + 30% = {iops_need:,}: buy about {extra_iops:,} extra IOPS on top of the {free_iops:,} free."
+    iops_text += iops_bump
+    if iops_need and effective_iops < iops_need:
+        iops_text += f" Effective IOPS ({effective_iops:,}) are still below the {iops_need:,} needed; add a larger disk or VM."
+
+    # Connections vs the SKU's default max_connections
+    max_conn = default_max_connections(recommended_sku["memory_gib"])
+    connections = None
+    if client_connections and client_connections > 0:
+        usable = max_conn - 15
+        pct = client_connections / usable * 100
+        if pct > 100:
+            msg = f"{client_connections:,} client connections exceed the {usable:,} usable. Enable PgBouncer (port 6432) and shrink app pools; don't raise max_connections."
+        elif pct > 80:
+            msg = f"{pct:.0f}% of the {usable:,} usable connections. Above 80%: enable PgBouncer."
+        else:
+            msg = f"{pct:.0f}% of the {usable:,} usable connections. Healthy; PgBouncer is optional (recommended for serverless or many instances)."
+        connections = {
+            "clients": int(client_connections), "max_connections": max_conn, "usable": usable,
+            "pct": pct, "pgbouncer_recommended": pct > 80, "message": msg,
+        }
 
     # 7. Structured architectural reasoning
     if ha_enabled:
@@ -302,12 +362,15 @@ def recommend_azure_postgresql(
             "target_storage_gib": target_storage_gib,
             "overhead_factor": f"{int((STORAGE_MVCC_OVERHEAD_FACTOR - 1.0) * 100)}%",
             "baseline_iops": disk_iops,
+            "free_iops": free_iops,
             "vm_iops_cap": vm_iops_cap,
             "effective_iops": effective_iops,
             "iops_justification": iops_text,
             "justification": (
                 f"Target storage is sized at {target_storage_gib:,} GiB incorporating a 30% safety buffer "
-                f"({disk_gb:.1f} GB -> {target_storage_gib:,} GiB). PostgreSQL's Multi-Version Concurrency "
+                f"({disk_gb:.1f} GB"
+                + (f" + {growth_12m:.0f} GB of 12-month growth" if growth_12m else "")
+                + f" -> {target_storage_gib:,} GiB). PostgreSQL's Multi-Version Concurrency "
                 "Control (MVCC) creates duplicate row versions on update; this 30% headroom accommodates "
                 "dead tuple accumulation prior to autovacuum, WAL logs, and index reindexing without disk saturation. "
                 + iops_text
@@ -331,11 +394,18 @@ def recommend_azure_postgresql(
         "ha_enabled": ha_enabled,
         "preferred_tier": preferred_tier,
         "capacity_warning": capacity_warning,
+        "extra_iops_to_buy": extra_iops,
+        "iops_needed": iops_need,
+        "connections": connections,
         "effective_iops": effective_iops,
         "inputs": {
             "peak_cpu_pct": peak_cpu_pct or None,
             "working_set_gb": working_set_gb or None,
-            "force_memory_optimized": force_memory_optimized,
+            "force_memory_optimized": force_mo,
+            "memory_profile": memory_profile,
+            "growth_gb_per_month": growth_gb_per_month or None,
+            "peak_iops": peak_iops or None,
+            "client_connections": client_connections or None,
             "is_production": is_production,
         },
         "reasoning": reasoning,

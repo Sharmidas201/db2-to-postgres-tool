@@ -19,12 +19,13 @@ For almost every production app you should start on a General Purpose D-series v
 
 | Tier | VM series | vCore options | Memory per vCore | Max IOPS (VM limit) | Max connections (default) | HA / replicas / reservations | Best for |
 |---|---|---|---|---|---|---|---|
-| **Burstable** | B-series (B1ms–B20ms); new Bsv2 "B2ats v2…B8as v2" sizes are listed on the pricing page | 1, 2, 4, 8, 12, 16, 20 | Variable (B1ms 2 GiB, B2s 4 GiB, B2ms+ 4 GiB per vCore) | 640 (B1ms) to 4,320 (B8ms+) | 50 (B1ms), 429 (B2s), 859 (B2ms), 1,718 (B4ms) | Same-zone HA only; no read replicas; no reservations | Dev/test, PoC, low-traffic side projects |
+| **Burstable** | B-series (B1ms–B20ms); new Bsv2 "B2ats v2…B8as v2" sizes are listed on the pricing page | 1, 2, 4, 8, 12, 16, 20 | Variable (B1ms 2 GiB, B2s 4 GiB, B2ms+ 4 GiB per vCore) | 640 (B1ms) to 4,320 (B8ms+) | 50 (B1ms), 429 (B2s), 859 (B2ms), 1,718 (B4ms) | No HA (Microsoft: only General Purpose and Memory Optimized support HA); no read replicas; no reservations (not re-verified) | Dev/test, PoC, low-traffic side projects |
 | **General Purpose** | Ddsv5/Dadsv5 (GA), Ddsv6/Dadsv6 (preview), plus older Ddsv4/Dsv3 | 2–96 (v5); up to 192 on v6 | 4 GiB | 3,750 (D2ds_v5) to 80,000 (D64+) | 859 (2 vCore), 1,718 (4), 3,437 (8), 5,000 (16+) | Full support | Most production web/API/SaaS OLTP |
 | **Memory Optimized** | Edsv5/Eadsv5 (GA), Edsv6/Eadsv6 (preview), plus older | 2–96 (v5); up to 192 on v6 | 6.75–9.5 GiB (E2ds_v5 = 16 GiB, E4 = 32, E8 = 64) | 3,200 (E2ds_v5) to 80,000 | 1,718 (2 vCore), 3,437 (4), 5,000 (8+) | Full support | Large working sets, reporting/analytics queries, high concurrency |
 | **Confidential (niche)** | Dcadsv5 / Ecadsv5 (AMD SEV-SNP) | 2–96 | 8–384 / 16–672 GiB total | 3,750–80,000 | Same formula | — | Regulated workloads needing in-use encryption |
 
 Notes on the table:
+- **Verified VM IOPS caps:** D2ds_v5 3,750; D4ds_v5 6,400; D8ds_v5 12,800; D16ds_v5 25,600; D32ds_v5 51,200; E2ds_v5 3,200; D64+/E64 up to 80,000. Other sizes were not verified.
 - **IOPS and bandwidth are capped by the VM, not just the disk.** A D2ds_v5 can't push more than 3,750 IOPS or 85 MiB/s however big the disk is. A D4ds_v5 is capped at 6,400 IOPS and 145 MiB/s, and a D8ds_v5 at 12,800 IOPS and 290 MiB/s. The v6 SKUs raise these ceilings: D4ds_v6 reaches 8,333 IOPS and 248 MiB/s.
 - **v6 is still in preview, with limits.** You can't scale between v6 and Burstable, and VNet integration isn't supported. Per the Learn region table, **Canada Central offers Intel v3/v4/v5 and AMD v5 only**, with no v6.
 - **Canada Central supports both zone-redundant HA and geo-redundant backup. Canada East supports only same-zone HA.** For a Toronto-based app, Canada Central is the default region.
@@ -55,7 +56,7 @@ Notes on the table:
 | | Premium SSD (v1) | Premium SSD v2 |
 |---|---|---|
 | Size | 32 GiB – 32 TiB, fixed tiers | 32 GiB – 64 TiB, in 1-GiB steps |
-| IOPS | Tied to size: 32 GiB = 120 (bursts to 3,500), 128 GiB = 500, 256 GiB = 1,100, 512 GiB = 2,300, 1 TiB = 5,000, max 20,000 | 3,000 free under 400 GiB, 12,000 free at 400 GiB and above; add up to 80,000 (500 IOPS per GiB) |
+| IOPS | Tied to size: 32 GiB = 120 (bursts to 3,500), 128 GiB = 500, 256 GiB = 1,100, 512 GiB = 2,300, 1 TiB = 5,000, max 20,000 | 3,000 free under 400 GiB, 12,000 free at 400 GiB and above; add up to 80,000 (500 IOPS per GiB, so 80,000 needs at least 160 GiB); IOPS/throughput can be changed independently, limited to about 4 changes per 24 hours |
 | Throughput | Tied to size, max 900 MB/s | 125 MB/s free under 400 GiB, 500 MB/s at 400 GiB and above; max 1,200 MB/s |
 | Autogrow | GA | Public preview |
 | Other | Host caching on disks under 4 TiB; "performance tier" can raise IOPS without growing the disk | No Burstable at creation; no long-term backups; no PG 13; lower latency |
@@ -63,7 +64,7 @@ Notes on the table:
 Practical rules:
 - **Default to Premium SSD v2 for new GP/MO servers.** Microsoft calls it "the best price for performance" for most general-purpose workloads. At 128–256 GiB it gives you 3,000 IOPS free, against 500–1,100 on Premium SSD. You can then tune IOPS and throughput up or down independently of size.
 - **Storage only grows, never shrinks.** Over-provisioning is a permanent cost, so start modest.
-- **The server goes read-only at 95% full, or when free space drops below 5 GiB.**
+- **The server goes read-only at 95% full, or when free space drops below 5 GiB.** Microsoft pages word this inconsistently ("or" vs "whichever is more"), so alert well before 80%.
 - **How Premium SSD autogrow behaves:**
   - It triggers at 20% free (or 64 GiB, whichever is smaller) on disks under 1 TiB, and at 10% free (or 64 GiB) on larger disks.
   - It always *doubles* both size and cost.
@@ -89,7 +90,7 @@ Practical rules:
 
 **Backups:**
 - Automated backups are kept for 7 days by default, configurable from 7 to 35. Long-term retention of up to 10 years goes through Azure Backup vaults.
-- Backups are stored on ZRS in zone-capable regions such as Canada Central.
+- Backup storage redundancy: Microsoft's reliability page says backups are zone-redundant (ZRS) in zone-capable regions regardless of HA, but the backup concepts page says servers with no HA or same-zone HA default to locally redundant. **The docs conflict; confirm in the portal at creation.**
 - Backup storage up to **100% of the primary's provisioned storage is free**, and HA doesn't increase that allowance.
 - **Geo-redundant backup can only be chosen at server creation.** It doubles the stored footprint and is billed as ((2 × local backup size) − provisioned storage) × price.
 - In Datapace's worked example, a 512 GiB server writing 40 GiB of backup data a day costs $0/month at 7 days local, $84 at 35 days local, and **$217 at 35 days geo-redundant**.
@@ -121,12 +122,12 @@ Practical rules:
    - **Gotcha:** `max_connections` doesn't change when you scale the SKU. A B1ms upgraded to B2s stays at 50 until you change the setting and restart.
    - Microsoft advises against raising `max_connections` above the default, because every connection, idle or not, uses memory.
 6. **Pooling.**
-   - Enable the built-in PgBouncer (`pgbouncer.enabled = true`, port **6432**, same hostname; default `pgbouncer.default_pool_size` = 50 per user/database pair).
+   - Enable the built-in PgBouncer (`pgbouncer.enabled = true`, port **6432**, same hostname; default `pgbouncer.default_pool_size` = 50 per user/database pair, `pgbouncer.max_client_conn` default 5,000, `pgbouncer.pool_mode` default transaction).
    - Use transaction pooling mode for web, API and serverless workloads such as Azure Functions, Vercel/Next.js API routes or Lambda-style bursts.
    - In transaction mode, watch for session features that break: session-level prepared statements, `LISTEN/NOTIFY`, temp tables and advisory locks.
    - Keep app-side pools small, around 5–20 per instance.
 7. **Scale up or scale out.**
-   - **Scale up** when CPU or memory is saturated on writes, or when a single query is slow. Near-zero-downtime scaling (<30 s) is the default, but it falls back to a longer restart if conditions aren't met, for example missing capacity, unlogged tables or a VNet subnet without enough IPs.
+   - **Scale up** when CPU or memory is saturated on writes, or when a single query is slow. Near-zero-downtime scaling (<30 s) is the default, but it falls back to a longer restart (Microsoft says roughly 2 to 10 minutes) if conditions aren't met: missing capacity or quota, unlogged tables, replicas, a VNet subnet without enough IPs, or scaling from/to a 1- or 2-vCore Burstable size.
    - **Scale out** to read replicas when reads dominate (above about 70–80% of load), your app can tolerate replication lag, and you can route reads separately.
    - Elastic clusters (Citus-based sharding) are the option for write scale-out beyond one node.
 
@@ -217,6 +218,23 @@ These thresholds are pragmatic starting points, not Microsoft-published limits. 
   - After every SKU change, re-check `max_connections`.
   - Before creating a server, decide on geo-redundant backup, because you can't change it later.
   - Keep PostgreSQL on a version in standard support to avoid extended-support fees.
+
+## Verification log (checked November 9, 2026 against Microsoft Learn)
+
+| Claim | Result |
+|---|---|
+| SSD v2 free 3,000 IOPS / 125 MB/s under 400 GiB; 12,000 / 500 MB/s at 400 GiB+; up to 80,000 IOPS | Confirmed (PostgreSQL SSD v2 page). Generic managed-disk docs differ (2,000 MB/s max); PostgreSQL page applies. |
+| VM caps D2 3,750, D4 6,400, D16 25,600, D32 51,200 | Confirmed (compute page, benchmark page). D8 12,800 and E-series caps other than E2 not independently confirmed. |
+| max_connections 50 / 429 / 859 / 1,718 / 3,437 / 5,000; 15 reserved; unchanged by SKU scale | Confirmed (limits page, Q&A). |
+| HA SLA 99.99% zone-redundant, 99.95% same-zone, 99.9% none; backups 7 to 35 days | Confirmed. |
+| Read-only at 95% / under 5 GiB; storage can't shrink; autogrow thresholds, doubling, 4,096 GiB boundary; SSD v2 autogrow preview | Confirmed; read-only wording inconsistent in Microsoft pages. |
+| PgBouncer port 6432, default pool 50 | Confirmed; also max_client_conn 5,000 and transaction mode default. |
+| Read replicas up to 5, 30 with cascading; asynchronous; none on Burstable | Confirmed. |
+| Burstable same-zone HA | **Wrong. Corrected:** Burstable has no HA. |
+| Backups always ZRS in Canada Central | **Conflicting docs.** Corrected to say confirm at creation. |
+| Near-zero-downtime scaling under 30 s | Partly: not for 1 to 2 vCore Burstable; fallback restart roughly 2 to 10 minutes. |
+| Reservations "up to 40% / 60%" | Matches the cost guide; other Microsoft pages quote higher maximums. Burstable ineligibility not re-verified. |
+| Prices, Datapace/Bytebase figures, Burstable regional block | Third-party or unofficial; not verifiable here. Check the pricing calculator. |
 
 ## Caveats
 
