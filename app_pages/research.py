@@ -10,7 +10,7 @@ from pathlib import Path
 
 import streamlit as st
 
-RESEARCH_FILE = Path(__file__).resolve().parents[1] / "azure_research.md"
+RESEARCH_FILE = Path(__file__).resolve().parents[1] / "docs" / "azure_research.md"
 
 LESSONS = [
     ("Start here", ":material/flag:"),

@@ -44,3 +44,11 @@ Thumbs.db
 .vscode/
 *.swp
 *.swo
+
+# PyInstaller output
+dist/
+build/
+*.spec
+
+# Real data exports must not be committed or bundled
+samples/

@@ -1,53 +1,64 @@
-# Azure Migration Assistant - Data Explorer
+# Azure Migration Assistant
 
-A lightweight, single-user Streamlit application for inspecting, searching, and exporting Excel and CSV datasets used for infrastructure and application sizing (ARM ServiceNow, BA-to-Server mapping, RV_Tools VMware exports, CMDB-CI-SERVER, and Axonius).
+A single-user Streamlit app that inspects migration datasets (ARM ServiceNow, BA-to-Server mapping, RVTools, CMDB-CI-SERVER, Axonius), maps applications to servers, and recommends an Azure Database for PostgreSQL Flexible Server size. It also has a guided "Research & guide" page that teaches the sizing rules.
 
-## Quick Start
+## Run it
 
-### 1. Launch the Application
-Run the launcher script:
+**Team members (no Python needed):** download the zip for your OS from the Releases page (or the Actions run), unzip, and run `AzureMigrationAssistant` (`.exe` on Windows). A console window opens and so does your browser. Close the console window to stop.
+- macOS: first launch may be blocked. Right-click the file, choose Open, then confirm.
+- Windows: SmartScreen may warn about an unsigned app. Choose "More info", then "Run anyway".
+
+**From source:**
 ```bash
-./run.sh
+./scripts/run.sh          # creates .venv on first run, then starts the app
 ```
-Or directly activate the virtual environment and run Streamlit:
+Opens at `http://localhost:8501`. Press the **Sample data** button in the sidebar for synthetic data.
+
+## Project layout
+
+```
+app.py               Streamlit entry point: page config, sidebar, navigation
+app_pages/
+  home.py            Upload, application lookup, sizing recommendation
+  research.py        Guided lessons + full research reference
+core/
+  azure_recommender.py  Sizing engine (SKU catalog, IOPS caps, rules)
+  app_lookup.py         Application -> server lookup and Excel report
+  dataset_loader.py     File loading and schema detection
+  path_manager.py       Saved local paths (stored in ~/.azure_migration_assistant/)
+  schemas.py            Dataset schema definitions
+  sample_data.py        Synthetic sample data generator
+docs/
+  azure_research.md     Sizing research (source of truth for the rules, with a verification log)
+  schema.md             Dataset column definitions
+  archive/              Older research drafts
+packaging/
+  launcher.py           Entry point of the executable
+  build.py              Builds the executable with PyInstaller
+scripts/run.sh          Run from source
+.github/workflows/build.yml   Builds Windows and macOS executables
+.streamlit/config.toml  Theme
+samples/                Local exports for your own use (git-ignored, never bundled)
+```
+
+## Build the executable
+
+PyInstaller builds only for the OS it runs on.
+
 ```bash
-.venv/bin/streamlit run app.py
+pip install -r requirements.txt -r requirements-build.txt
+python packaging/build.py        # -> dist/AzureMigrationAssistant-<os>.zip
 ```
 
-The application will open in your browser at `http://localhost:8501`.
+For Windows and macOS together, use GitHub Actions: run **Build executables** from the Actions tab, or push a tag (`git tag v1.0.0 && git push --tags`) to attach both zips to a release.
 
----
-
-## Features
-
-1. **Multi-File Upload & Auto-Detection**:
-   - Drag and drop multiple `.xlsx`, `.xls`, or `.csv` files at once.
-   - Automatically detects whether the file is:
-     - `ARM SERVICE NOW FILE` (Applications catalog)
-     - `BA-AS-A-SERVER` (Application-to-Server mapping)
-     - `RV_TOOLS` (VMware VM vCPU, RAM, and Disk storage)
-     - `CMDB-CI-SERVER` (Physical/Cloud servers, CPU, RAM, Disk)
-     - `AXONIUS DEVICES` (Asset reconciliation)
-2. **Sheet Selector**:
-   - For multi-tab Excel files (such as RV_Tools), choose between sheets (e.g. `vInfo`, `vCPU`, `vDisk`, `vMemory`).
-3. **Interactive Data Table**:
-   - Global keyword search across all columns.
-   - Column selector to display/hide any columns.
-   - Sortable columns and resizeable table view.
-4. **Column & Data Type Inspector**:
-   - Expandable breakdown showing data types, non-null counts, unique counts, and sample values.
-5. **Downloads & Exports**:
-   - Export any viewed dataset as CSV.
-   - Export any viewed dataset as Excel (`.xlsx`).
-   - One-click **Consolidated Excel Export** that combines all uploaded datasets into a single workbook with individual tabs.
-6. **Built-in Sample Data**:
-   - Click the **🧪 Sample Data** button in the sidebar to instantly populate realistic mock datasets matching the schemas in `schema.md`.
+The bundle contains the code, `docs/` and the theme only. Real exports in `samples/` are not included, and each user's saved file paths stay in their own home folder.
 
 ## Azure sizing rules
 
-Recommendations follow `azure_research.md` (Canada Central, Flexible Server, D/E/B-series v5):
+Rules follow `docs/azure_research.md` (Canada Central, Flexible Server, v5 SKUs):
 
-- **Production:** General Purpose (D-series v5, 1:4) by default. Memory Optimized (E-series, 1:8) only when source RAM:vCPU is above 4:1 or *Force Memory Optimized* is on.
-- **Non-production:** Burstable (B-series), dev/test only. Stop off-hours. No zone-redundant HA.
-- **Optional inputs:** peak CPU % sizes vCPUs at 65% target utilization; hot working set GB sizes RAM at 1.5x. Without them, cores map 1:1 and RAM uses 1.25x source RAM.
-- **Storage:** +30% MVCC/WAL headroom on allocated disk, 32 GiB minimum.
+- **Production:** General Purpose (D-series, 4 GiB/vCore) by default. Memory Optimized (E-series) when the RAM target needs it or the source RAM:vCPU is above 4:1.
+- **Non-production:** Burstable, dev/test only. No HA.
+- **Advanced inputs:** peak CPU %, hot working set, data growth, peak IOPS and connection counts replace default estimates with your measurements.
+- **Storage:** 12 months of growth +30% MVCC/WAL headroom, 32 GiB minimum. IOPS are the lower of the disk's and the VM's limit.

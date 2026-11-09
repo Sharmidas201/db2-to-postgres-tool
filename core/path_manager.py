@@ -8,14 +8,19 @@ import json
 import os
 import re
 from pathlib import Path
-from schemas import check_filename_includes, normalize_name
+from core.schemas import check_filename_includes, normalize_name
 
-CONFIG_FILE = Path(".saved_dataset_paths.json")
-DEFAULT_SEARCH_DIRS = [Path("samples"), Path(".")]
+# Saved paths live in the user's home so they work for a packaged executable too (the bundle is read-only
+# and shared, and must never ship one person's file paths).
+CONFIG_DIR = Path.home() / ".azure_migration_assistant"
+CONFIG_FILE = CONFIG_DIR / "saved_dataset_paths.json"
+# Where the user launched the app from (the packaged launcher changes the working directory).
+LAUNCH_DIR = Path(os.environ.get("AMA_LAUNCH_DIR", Path.cwd()))
+DEFAULT_SEARCH_DIRS = [LAUNCH_DIR / "samples", LAUNCH_DIR, Path.home() / "Downloads"]
 
 
 def load_persistent_paths() -> dict:
-    """Reads saved dataset paths from .saved_dataset_paths.json."""
+    """Reads saved dataset paths from the user config file."""
     if CONFIG_FILE.exists():
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
@@ -31,13 +36,14 @@ def load_persistent_paths() -> dict:
 
 
 def save_persistent_path(slot_key: str, file_path: str):
-    """Saves or updates a file path in .saved_dataset_paths.json."""
+    """Saves or updates a file path in the user config file."""
     paths = load_persistent_paths()
     if file_path and Path(file_path).exists():
         paths[slot_key] = str(Path(file_path).resolve())
     else:
         paths.pop(slot_key, None)
     try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(paths, f, indent=2)
     except Exception:

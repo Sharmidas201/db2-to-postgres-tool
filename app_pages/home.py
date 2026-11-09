@@ -7,20 +7,19 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from schemas import detect_schema, KNOWN_SCHEMAS
-from path_manager import (
+from core.schemas import detect_schema, KNOWN_SCHEMAS
+from core.path_manager import (
     find_local_system_path,
     scan_default_local_files,
     load_persistent_paths,
     clear_persistent_paths
 )
-from dataset_loader import load_dataset_from_source, load_sample_data, convert_df_to_excel_bytes
-import app_lookup
-import azure_recommender
+from core.dataset_loader import load_dataset_from_source, load_sample_data, convert_df_to_excel_bytes
+from core import app_lookup, azure_recommender
 importlib.reload(app_lookup)
 importlib.reload(azure_recommender)
-from app_lookup import extract_app_numbers, lookup_application, generate_app_excel_bytes
-from azure_recommender import recommend_azure_postgresql, extract_domain_from_fqdn, select_azure_sku, generate_azure_markdown_report
+from core.app_lookup import extract_app_numbers, lookup_application, generate_app_excel_bytes
+from core.azure_recommender import recommend_azure_postgresql, extract_domain_from_fqdn, select_azure_sku, generate_azure_markdown_report
 
 
 # Automatic restoration from saved persistent paths on startup

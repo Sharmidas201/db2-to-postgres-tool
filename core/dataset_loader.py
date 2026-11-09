@@ -6,9 +6,9 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from schemas import detect_schema
-from path_manager import find_local_system_path, save_persistent_path
-from sample_data import generate_sample_datasets
+from core.schemas import detect_schema
+from core.path_manager import find_local_system_path, save_persistent_path
+from core.sample_data import generate_sample_datasets
 
 
 def load_dataset_from_source(source, expected_schema=None, slot_key=None):
