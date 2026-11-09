@@ -5,9 +5,17 @@ Single-user Streamlit UI for viewing datasets and looking up application hardwar
 
 import io
 import importlib
+from pathlib import Path
 import streamlit as st
 import pandas as pd
 from schemas import detect_schema, KNOWN_SCHEMAS, normalize_name, check_filename_includes
+from path_manager import (
+    find_local_system_path,
+    scan_default_local_files,
+    save_persistent_path,
+    load_persistent_paths,
+    clear_persistent_paths
+)
 from sample_data import generate_sample_datasets
 import app_lookup
 import azure_recommender
@@ -44,44 +52,137 @@ if "active_app_num" not in st.session_state:
     st.session_state.active_app_num = ""
 
 
-def load_file_into_state(file_name, file_bytes, expected_schema=None):
-    """Parses uploaded file bytes (Excel or CSV) into DataFrames in session state."""
+def load_dataset_from_source(source, expected_schema=None, slot_key=None):
+    """
+    Loads dataset from a local file path (str or Path) or uploaded file object.
+    If the file exists on the local filesystem, saves the path, avoids holding large
+    file_bytes in memory, and persists the path across app restarts.
+    """
+    file_path = None
+    file_name = ""
+    file_bytes = None
+
+    if isinstance(source, (str, Path)):
+        resolved = Path(source).expanduser().resolve()
+        if resolved.exists() and resolved.is_file():
+            file_path = resolved
+            file_name = resolved.name
+        else:
+            st.error(f"File not found on system: {source}")
+            return False
+    elif hasattr(source, "name"):
+        file_name = source.name
+        # Check if this uploaded file exists on the local system
+        local_match = find_local_system_path(file_name)
+        if local_match:
+            file_path = local_match
+        else:
+            file_bytes = source.getvalue()
+    else:
+        return False
+
     try:
         schema = detect_schema(file_name)
         if schema == "Custom / Unknown" and expected_schema:
             schema = expected_schema
 
-        if file_name.endswith((".xlsx", ".xls")):
-            excel_file = pd.ExcelFile(io.BytesIO(file_bytes))
-            sheet_names = excel_file.sheet_names
-            preferred_sheet = sheet_names[0]
-            for s in sheet_names:
-                if "server" in s.lower() or "sheet" in s.lower() or "data" in s.lower():
-                    preferred_sheet = s
-                    break
+        if file_path:
+            if file_name.endswith((".xlsx", ".xls")):
+                excel_file = pd.ExcelFile(file_path)
+                sheet_names = excel_file.sheet_names
+                pref_sheet = sheet_names[0]
+                for s in sheet_names:
+                    if any(k in s.lower() for k in ["server", "sheet", "data"]):
+                        pref_sheet = s
+                        break
+                df = pd.read_excel(excel_file, sheet_name=pref_sheet)
+                is_excel = True
+            else:
+                df = pd.read_csv(file_path)
+                sheet_names = ["default"]
+                pref_sheet = "default"
+                is_excel = False
 
-            df = pd.read_excel(excel_file, sheet_name=preferred_sheet)
+            # Persist path if slot_key provided or derivable
+            derived_slot = slot_key
+            if not derived_slot:
+                if schema == "ARM SERVICE NOW FILE":
+                    derived_slot = "arm"
+                elif schema == "BA-AS-A-SERVER":
+                    derived_slot = "ba"
+                elif schema == "CMDB-CI-SERVER":
+                    derived_slot = "cmdb"
+            if derived_slot:
+                save_persistent_path(derived_slot, str(file_path))
+
             st.session_state.datasets[file_name] = {
+                "file_path": str(file_path),
+                "file_bytes": None,
+                "df": df,
+                "detected_schema": schema,
+                "sheets": sheet_names,
+                "active_sheet": pref_sheet,
+                "is_excel": is_excel,
+                "is_local": True
+            }
+            return True
+        else:
+            # In-memory uploaded bytes fallback
+            if file_name.endswith((".xlsx", ".xls")):
+                excel_file = pd.ExcelFile(io.BytesIO(file_bytes))
+                sheet_names = excel_file.sheet_names
+                pref_sheet = sheet_names[0]
+                for s in sheet_names:
+                    if any(k in s.lower() for k in ["server", "sheet", "data"]):
+                        pref_sheet = s
+                        break
+                df = pd.read_excel(excel_file, sheet_name=pref_sheet)
+                is_excel = True
+            else:
+                df = pd.read_csv(io.BytesIO(file_bytes))
+                sheet_names = ["default"]
+                pref_sheet = "default"
+                is_excel = False
+
+            st.session_state.datasets[file_name] = {
+                "file_path": None,
                 "file_bytes": file_bytes,
                 "df": df,
                 "detected_schema": schema,
                 "sheets": sheet_names,
-                "active_sheet": preferred_sheet,
-                "is_excel": True
+                "active_sheet": pref_sheet,
+                "is_excel": is_excel,
+                "is_local": False
             }
-        else:
-            # CSV file
-            df = pd.read_csv(io.BytesIO(file_bytes))
-            st.session_state.datasets[file_name] = {
-                "file_bytes": file_bytes,
-                "df": df,
-                "detected_schema": schema,
-                "sheets": ["default"],
-                "active_sheet": "default",
-                "is_excel": False
-            }
+            return True
     except Exception as e:
         st.error(f"Error loading {file_name}: {e}")
+        return False
+
+
+def load_file_into_state(file_name, file_bytes, expected_schema=None):
+    """Compatibility wrapper calling load_dataset_from_source."""
+    class DummyUpload:
+        def __init__(self, name, bytes_val):
+            self.name = name
+            self._bytes = bytes_val
+        def getvalue(self):
+            return self._bytes
+    return load_dataset_from_source(DummyUpload(file_name, file_bytes), expected_schema=expected_schema)
+
+
+# Automatic restoration from saved persistent paths on startup
+if "initialized_from_saved_paths" not in st.session_state:
+    st.session_state.initialized_from_saved_paths = True
+    saved_initial_paths = load_persistent_paths()
+    slot_schemas_init = {
+        "arm": "ARM SERVICE NOW FILE",
+        "ba": "BA-AS-A-SERVER",
+        "cmdb": "CMDB-CI-SERVER"
+    }
+    for s_slot, s_path in saved_initial_paths.items():
+        if Path(s_path).exists():
+            load_dataset_from_source(s_path, expected_schema=slot_schemas_init.get(s_slot), slot_key=s_slot)
 
 
 def load_sample_data():
@@ -128,11 +229,12 @@ with st.sidebar:
         meta_entry = next(((k, v) for k, v in st.session_state.datasets.items() if v.get("detected_schema") == schema_key), None)
         if meta_entry:
             fname, meta = meta_entry
+            path_tag = " *(local disk)*" if meta.get("file_path") else ""
             st.markdown(f"**🟢 {label}**")
-            st.caption(f"`{fname}` | Rows: **{len(meta['df']):,}**")
+            st.caption(f"`{fname}` | Rows: **{len(meta['df']):,}**{path_tag}")
         else:
             st.markdown(f"**⚪ {label}**")
-            st.caption(f"Waiting for upload (includes `{keyword}`)")
+            st.caption(f"Waiting for path / upload (includes `{keyword}`)")
 
     st.markdown("---")
     st.subheader("📥 Consolidated Export")
@@ -158,22 +260,32 @@ with st.sidebar:
 st.title("☁️ Azure Migration Assistant")
 st.caption("Application Hardware Sizing & Target Architecture Planner")
 
-# Dedicated Upload Section on Main Page
+# Dedicated Upload & System Path Section on Main Page
 with st.container(border=True):
-    col_u_hdr, col_u_actions = st.columns([3, 1.8], vertical_alignment="center")
+    col_u_hdr, col_u_actions = st.columns([2.5, 2.5], vertical_alignment="center")
     with col_u_hdr:
-        st.subheader("📤 Dataset Uploads")
-        st.caption("Upload each file separately. Datasets are identified based on whether the filename includes `ARM Service now`, `ba_as_server`, or `cmdb_ci_server`.")
+        st.subheader("📁 Dataset Management & Local File Paths")
+        st.caption("Point to files on your system or upload them. Local paths are saved and persist across restarts.")
     with col_u_actions:
-        col_btn_sample, col_btn_clear = st.columns(2)
-        with col_btn_sample:
+        c_btn_local, c_btn_sample, c_btn_clear = st.columns(3)
+        with c_btn_local:
+            if st.button("⚡ Load Local", width="stretch", help="Load detected files from local system and save paths"):
+                scanned = scan_default_local_files()
+                slot_schemas = {"arm": "ARM SERVICE NOW FILE", "ba": "BA-AS-A-SERVER", "cmdb": "CMDB-CI-SERVER"}
+                for s_key, s_path in scanned.items():
+                    if s_path and s_path.exists():
+                        load_dataset_from_source(s_path, expected_schema=slot_schemas.get(s_key), slot_key=s_key)
+                st.session_state.active_app_num = ""
+                st.rerun()
+        with c_btn_sample:
             if st.button("🧪 Sample Data", width="stretch", help="Load built-in mock datasets"):
                 load_sample_data()
                 st.session_state.active_app_num = ""
                 st.rerun()
-        with col_btn_clear:
-            if st.button("🗑️ Clear All", width="stretch", help="Clear all loaded datasets"):
+        with c_btn_clear:
+            if st.button("🗑️ Clear All", width="stretch", help="Clear all loaded datasets and saved path configuration"):
                 st.session_state.datasets.clear()
+                clear_persistent_paths()
                 st.session_state.active_app_num = ""
                 for k in ["last_arm_upload", "last_ba_upload", "last_cmdb_upload"]:
                     st.session_state.pop(k, None)
@@ -181,16 +293,44 @@ with st.container(border=True):
 
     col_arm, col_ba, col_cmdb = st.columns(3)
 
+    saved_paths = load_persistent_paths()
+    scanned_defaults = scan_default_local_files()
+
     # 1. ARM Service Now Slot
     with col_arm:
         with st.container(border=True):
             st.markdown("##### 1. ARM Service Now")
             st.caption("Catalog & metadata (includes `ARM Service now`)")
+
+            default_arm_path = saved_paths.get("arm") or (str(scanned_defaults["arm"]) if scanned_defaults.get("arm") else "")
+            c_inp_arm, c_btn_arm = st.columns([3, 1], vertical_alignment="bottom")
+            with c_inp_arm:
+                arm_path_input = st.text_input(
+                    "Local File Path:",
+                    value=default_arm_path,
+                    key="input_arm_path",
+                    placeholder="e.g. samples/ARM ServiceNow Data.xlsx",
+                    help="System path to ARM ServiceNow Excel or CSV file"
+                )
+            with c_btn_arm:
+                if st.button("Load", key="btn_load_arm", width="stretch", help="Load dataset directly from path"):
+                    if arm_path_input.strip():
+                        resolved_arm = find_local_system_path(arm_path_input.strip())
+                        if resolved_arm:
+                            to_del = [k for k, v in st.session_state.datasets.items() if v.get("detected_schema") == "ARM SERVICE NOW FILE"]
+                            for k in to_del:
+                                del st.session_state.datasets[k]
+                            load_dataset_from_source(resolved_arm, expected_schema="ARM SERVICE NOW FILE", slot_key="arm")
+                            st.session_state.active_app_num = ""
+                            st.rerun()
+                        else:
+                            st.error(f"Path not found on disk: {arm_path_input}")
+
             arm_file = st.file_uploader(
-                "Upload ARM Service Now (.xlsx, .csv)",
+                "Or drop/upload file",
                 type=["xlsx", "xls", "csv"],
                 key="uploader_arm_file",
-                label_visibility="collapsed"
+                help="Drop or upload file. If located on this system, path will be saved."
             )
             if arm_file is not None:
                 if st.session_state.get("last_arm_upload") != arm_file.name:
@@ -198,7 +338,7 @@ with st.container(border=True):
                     for k in to_del:
                         del st.session_state.datasets[k]
                     st.session_state["last_arm_upload"] = arm_file.name
-                    load_file_into_state(arm_file.name, arm_file.getvalue(), expected_schema="ARM SERVICE NOW FILE")
+                    load_dataset_from_source(arm_file, expected_schema="ARM SERVICE NOW FILE", slot_key="arm")
                     st.session_state.active_app_num = ""
                     st.rerun()
             elif st.session_state.get("last_arm_upload"):
@@ -213,20 +353,46 @@ with st.container(border=True):
                 fname, meta = arm_meta
                 matched = check_filename_includes(fname, "ARM Service now") or ("arm" in normalize_name(fname) and "service" in normalize_name(fname))
                 match_tag = "✅ Keyword verified" if matched else "⚠️ Keyword not in filename"
-                st.success(f"🟢 **{fname}**\n\nRows: **{len(meta['df']):,}** | Cols: **{len(meta['df'].columns)}**\n\n*{match_tag}*")
+                path_info = f"📍 `{meta['file_path']}`" if meta.get("file_path") else "Uploaded via browser"
+                st.success(f"🟢 **{fname}**\n\nRows: **{len(meta['df']):,}** | Cols: **{len(meta['df'].columns)}**\n\n{path_info}\n\n*{match_tag}*")
             else:
-                st.info("⚪ *Not uploaded yet*")
+                st.info("⚪ *Not loaded yet*")
 
     # 2. BA_AS_SERVER Slot
     with col_ba:
         with st.container(border=True):
             st.markdown("##### 2. BA_AS_SERVER")
             st.caption("App-to-server mapping (includes `ba_as_server`)")
+
+            default_ba_path = saved_paths.get("ba") or (str(scanned_defaults["ba"]) if scanned_defaults.get("ba") else "")
+            c_inp_ba, c_btn_ba = st.columns([3, 1], vertical_alignment="bottom")
+            with c_inp_ba:
+                ba_path_input = st.text_input(
+                    "Local File Path:",
+                    value=default_ba_path,
+                    key="input_ba_path",
+                    placeholder="e.g. samples/BA_AS_Server_No_Filter.xlsx",
+                    help="System path to BA_AS_SERVER Excel or CSV file"
+                )
+            with c_btn_ba:
+                if st.button("Load", key="btn_load_ba", width="stretch", help="Load dataset directly from path"):
+                    if ba_path_input.strip():
+                        resolved_ba = find_local_system_path(ba_path_input.strip())
+                        if resolved_ba:
+                            to_del = [k for k, v in st.session_state.datasets.items() if v.get("detected_schema") == "BA-AS-A-SERVER"]
+                            for k in to_del:
+                                del st.session_state.datasets[k]
+                            load_dataset_from_source(resolved_ba, expected_schema="BA-AS-A-SERVER", slot_key="ba")
+                            st.session_state.active_app_num = ""
+                            st.rerun()
+                        else:
+                            st.error(f"Path not found on disk: {ba_path_input}")
+
             ba_file = st.file_uploader(
-                "Upload BA_AS_SERVER (.xlsx, .csv)",
+                "Or drop/upload file",
                 type=["xlsx", "xls", "csv"],
                 key="uploader_ba_file",
-                label_visibility="collapsed"
+                help="Drop or upload file. If located on this system, path will be saved."
             )
             if ba_file is not None:
                 if st.session_state.get("last_ba_upload") != ba_file.name:
@@ -234,7 +400,7 @@ with st.container(border=True):
                     for k in to_del:
                         del st.session_state.datasets[k]
                     st.session_state["last_ba_upload"] = ba_file.name
-                    load_file_into_state(ba_file.name, ba_file.getvalue(), expected_schema="BA-AS-A-SERVER")
+                    load_dataset_from_source(ba_file, expected_schema="BA-AS-A-SERVER", slot_key="ba")
                     st.session_state.active_app_num = ""
                     st.rerun()
             elif st.session_state.get("last_ba_upload"):
@@ -249,20 +415,46 @@ with st.container(border=True):
                 fname, meta = ba_meta
                 matched = check_filename_includes(fname, "ba_as_server") or check_filename_includes(fname, "ba_as_a_server")
                 match_tag = "✅ Keyword verified" if matched else "⚠️ Keyword not in filename"
-                st.success(f"🟢 **{fname}**\n\nRows: **{len(meta['df']):,}** | Cols: **{len(meta['df'].columns)}**\n\n*{match_tag}*")
+                path_info = f"📍 `{meta['file_path']}`" if meta.get("file_path") else "Uploaded via browser"
+                st.success(f"🟢 **{fname}**\n\nRows: **{len(meta['df']):,}** | Cols: **{len(meta['df'].columns)}**\n\n{path_info}\n\n*{match_tag}*")
             else:
-                st.info("⚪ *Not uploaded yet*")
+                st.info("⚪ *Not loaded yet*")
 
     # 3. CMDB_CI_SERVER Slot
     with col_cmdb:
         with st.container(border=True):
             st.markdown("##### 3. CMDB_CI_SERVER")
             st.caption("Server hardware specs & OS (includes `cmdb_ci_server`)")
+
+            default_cmdb_path = saved_paths.get("cmdb") or (str(scanned_defaults["cmdb"]) if scanned_defaults.get("cmdb") else "")
+            c_inp_cmdb, c_btn_cmdb = st.columns([3, 1], vertical_alignment="bottom")
+            with c_inp_cmdb:
+                cmdb_path_input = st.text_input(
+                    "Local File Path:",
+                    value=default_cmdb_path,
+                    key="input_cmdb_path",
+                    placeholder="e.g. samples/cmdb_ci_server.xlsx",
+                    help="System path to CMDB_CI_SERVER Excel or CSV file"
+                )
+            with c_btn_cmdb:
+                if st.button("Load", key="btn_load_cmdb", width="stretch", help="Load dataset directly from path"):
+                    if cmdb_path_input.strip():
+                        resolved_cmdb = find_local_system_path(cmdb_path_input.strip())
+                        if resolved_cmdb:
+                            to_del = [k for k, v in st.session_state.datasets.items() if v.get("detected_schema") == "CMDB-CI-SERVER"]
+                            for k in to_del:
+                                del st.session_state.datasets[k]
+                            load_dataset_from_source(resolved_cmdb, expected_schema="CMDB-CI-SERVER", slot_key="cmdb")
+                            st.session_state.active_app_num = ""
+                            st.rerun()
+                        else:
+                            st.error(f"Path not found on disk: {cmdb_path_input}")
+
             cmdb_file = st.file_uploader(
-                "Upload CMDB_CI_SERVER (.xlsx, .csv)",
+                "Or drop/upload file",
                 type=["xlsx", "xls", "csv"],
                 key="uploader_cmdb_file",
-                label_visibility="collapsed"
+                help="Drop or upload file. If located on this system, path will be saved."
             )
             if cmdb_file is not None:
                 if st.session_state.get("last_cmdb_upload") != cmdb_file.name:
@@ -270,7 +462,7 @@ with st.container(border=True):
                     for k in to_del:
                         del st.session_state.datasets[k]
                     st.session_state["last_cmdb_upload"] = cmdb_file.name
-                    load_file_into_state(cmdb_file.name, cmdb_file.getvalue(), expected_schema="CMDB-CI-SERVER")
+                    load_dataset_from_source(cmdb_file, expected_schema="CMDB-CI-SERVER", slot_key="cmdb")
                     st.session_state.active_app_num = ""
                     st.rerun()
             elif st.session_state.get("last_cmdb_upload"):
@@ -285,9 +477,10 @@ with st.container(border=True):
                 fname, meta = cmdb_meta
                 matched = check_filename_includes(fname, "cmdb_ci_server")
                 match_tag = "✅ Keyword verified" if matched else "⚠️ Keyword not in filename"
-                st.success(f"🟢 **{fname}**\n\nRows: **{len(meta['df']):,}** | Cols: **{len(meta['df'].columns)}**\n\n*{match_tag}*")
+                path_info = f"📍 `{meta['file_path']}`" if meta.get("file_path") else "Uploaded via browser"
+                st.success(f"🟢 **{fname}**\n\nRows: **{len(meta['df']):,}** | Cols: **{len(meta['df'].columns)}**\n\n{path_info}\n\n*{match_tag}*")
             else:
-                st.info("⚪ *Not uploaded yet*")
+                st.info("⚪ *Not loaded yet*")
 
 if not st.session_state.datasets:
     # Empty State Guidance
@@ -615,7 +808,10 @@ else:
                         )
                         if new_sheet != meta["active_sheet"]:
                             meta["active_sheet"] = new_sheet
-                            new_df = pd.read_excel(io.BytesIO(meta["file_bytes"]), sheet_name=new_sheet)
+                            if meta.get("file_path") and Path(meta["file_path"]).exists():
+                                new_df = pd.read_excel(meta["file_path"], sheet_name=new_sheet)
+                            else:
+                                new_df = pd.read_excel(io.BytesIO(meta["file_bytes"]), sheet_name=new_sheet)
                             meta["df"] = new_df
                             meta["detected_schema"] = detect_schema(file_name)
                             st.rerun()

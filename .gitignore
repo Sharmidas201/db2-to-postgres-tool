@@ -31,6 +31,9 @@ wheels/
 .DS_Store
 Thumbs.db
 
+# Local persistent configs
+.saved_dataset_paths.json
+
 # Environment variables & secrets
 .env
 .env.*
