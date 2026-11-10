@@ -2,7 +2,7 @@
 
 ## Purpose and scope
 
-This first assessment milestone is offline. It consumes metadata exports supplied by a Db2 platform owner; it does not connect to Db2, store credentials, convert DDL, or claim PostgreSQL compatibility. It reports what evidence was supplied, validates its structure, and flags missing or inconsistent evidence for follow-up.
+This assessment prototype is offline. It consumes metadata exports supplied by a Db2 platform owner; it does not connect to Db2, store credentials, convert DDL, or claim full PostgreSQL compatibility. It validates evidence structure, applies an initial ruleset to source type metadata and selected target-service constraints, estimates storage when suitable source metrics are present, and flags gaps for review. It does not calculate an overall compatibility score.
 
 Supported source platform labels:
 
@@ -14,7 +14,7 @@ These products have different catalog layouts. Each owner should export from the
 
 ## Artifact bundle
 
-Download `db2_assessment_template.zip` from the Db2 assessment page. It contains `manifest.json`, four header-only CSV files, and a README. Upload the populated ZIP or the CSV files directly.
+Download `db2_assessment_template.zip` from the Db2 assessment page. It contains `manifest.json`, four header-only CSV files, and a README. Upload the populated ZIP or the CSV files directly. Three synthetic demos are also available, shaped for LUW, z/OS, and IBM i. Demo catalog names and metadata are fictional and are not evidence of compatibility with real catalogs.
 
 The manifest identifies the platform, source version or function level, source label, extraction date, and method. Do not put credentials or connection strings in the bundle.
 
@@ -36,7 +36,7 @@ Required: `table_schema`, `table_name`, `column_name`, `data_type`.
 
 Optional: `table_catalog`, `ordinal_position`, `length`, `precision`, `scale`, `nullable`, `default_expression`, `generated_expression`.
 
-DDL text is not required for this intake phase. Column metadata is needed to inventory data types and support later compatibility rules.
+DDL text is not required for this intake phase. Column metadata drives the current starter type checks using source type, length, precision, and scale. Unknown types and behavior-sensitive mappings are sent for review. This ruleset is incomplete and must be checked against real platform exports and approved documentation before migration decisions.
 
 ### `dependencies.csv`
 
@@ -68,14 +68,22 @@ Use documentation matching the installed Db2 version and function level before a
 
 PostgreSQL records object dependencies in `pg_depend`; this can inform a later target-side comparison and validation stage. [PostgreSQL pg_depend](https://www.postgresql.org/docs/current/catalog-pg-depend.html)
 
-## Current report behavior
+## Current assessment checks and limitations
 
-The page reports source context, object/column/dependency/metric counts, required-field validation, duplicate object identifiers, and dependency endpoints that do not match the supplied object inventory. Missing metadata is reported as a coverage finding, not silently interpreted as incompatibility. No overall compatibility percentage is generated.
+- Column type checks propose starter PostgreSQL mappings from imported Db2 type, declared length, precision, and scale. Direct built-in mappings still require representative-value and application review; behavior-sensitive types and unknown types are flagged.
+- Target service checks currently include the Azure Database for PostgreSQL Flexible Server tablespace limitation. They are not an exhaustive service feature matrix.
+- Storage estimation uses the largest recognized database-level allocated/used-size metric, then applies the selected growth and headroom assumptions. It is a planning baseline, not a Db2-to-PostgreSQL physical-size ratio. It does not size CPU, memory, IOPS, WAL, indexes, replicas, or backups.
+- The synthetic platform demos check the intake path and current code rules only. No real LUW, z/OS, or IBM i export has been validated yet. The template is a normalized contract; platform-specific export queries and catalog mappings remain to be reviewed.
+- Dependencies from catalogs do not capture all dynamic SQL, application code, scheduling, or external integrations. SQL behavior, DDL conversion, and target-side validation are not implemented.
 
-## Later milestones
+## Report behavior
 
-1. Add reviewed, versioned export queries or platform-specific mapping profiles for each supported Db2 release.
-2. Add Db2-to-PostgreSQL compatibility rules with object-level evidence, severity, recommendation, and rule provenance.
-3. Add application/runtime dependency sources and explicit coverage/completeness reporting.
-4. When approved, add DDL/routine analysis and target-side validation against PostgreSQL catalogs.
-5. Add workload sizing and migration complexity/effort estimates only after agreeing on the required performance evidence and scoring method.
+The report includes source and target context, evidence coverage, findings with evidence and next steps, column type results, target-service object results, storage assumptions, and imported metadata. Missing metadata is reported as a coverage finding, not silently interpreted as incompatibility. No overall compatibility percentage is generated.
+
+## Next milestones
+
+1. Validate the upload contract and starter rules against real catalog exports from LUW, z/OS, and IBM i, then add release-aware export queries/mapping profiles.
+2. Expand reviewed rules for Db2 types, object features, defaults, generated columns, procedural code, and SQL behavior, with rule provenance and target-version behavior.
+3. Improve dependency completeness by including application, package, scheduler, dynamic SQL, and external-service evidence where available.
+4. Add workload-based target sizing from agreed CPU, memory, I/O, concurrency, retention, and availability evidence.
+5. When approved, add DDL/routine analysis and PostgreSQL target-side validation. Keep scoring out until its evidence and method are agreed.

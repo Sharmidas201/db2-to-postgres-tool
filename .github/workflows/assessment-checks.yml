@@ -1,0 +1,29 @@
+name: Db2 assessment checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-docker.lock
+      - run: python -m pip install -r requirements-docker.lock
+      - run: python -m unittest discover -s tests -p 'test_db2_assessment.py' -v
+
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t db2-to-postgres-tool:${{ github.sha }} .
