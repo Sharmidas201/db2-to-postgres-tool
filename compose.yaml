@@ -1,0 +1,11 @@
+services:
+  assessment-app:
+    build: .
+    ports:
+      - "8501:8501"
+    volumes:
+      - app_config:/home/assessment/.azure_migration_assistant
+    restart: unless-stopped
+
+volumes:
+  app_config:

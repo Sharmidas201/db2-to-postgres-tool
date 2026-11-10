@@ -14,7 +14,8 @@ from core.path_manager import (
     load_persistent_paths,
     clear_persistent_paths
 )
-from core.dataset_loader import load_dataset_from_source, load_sample_data, convert_df_to_excel_bytes
+from core.dataset_loader import load_dataset_from_source, convert_df_to_excel_bytes
+from core.source_adapters import SOURCE_ADAPTERS, normalize_frame, validate_source
 from core import app_lookup, azure_recommender
 importlib.reload(app_lookup)
 importlib.reload(azure_recommender)
@@ -29,11 +30,27 @@ if "initialized_from_saved_paths" not in st.session_state:
     slot_schemas_init = {
         "arm": "ARM SERVICE NOW FILE",
         "ba": "BA-AS-A-SERVER",
-        "cmdb": "CMDB-CI-SERVER"
+        "cmdb": "CMDB-CI-SERVER",
+        "axonius": "AXONIUS DEVICES",
+        "rvtools": "RV_TOOLS",
+        "visual_group": "VISUAL-GROUP",
+        "sizing_report": "SIZING REPORT",
     }
     for s_slot, s_path in saved_initial_paths.items():
         if Path(s_path).exists():
             load_dataset_from_source(s_path, expected_schema=slot_schemas_init.get(s_slot), slot_key=s_slot)
+
+    # Also discover the conventional files in ./samples (and the launch folder).
+    # Previously these files were only read after clicking "Load local".
+    for s_slot, s_path in scan_default_local_files().items():
+        if s_path and s_path.exists():
+            schema_key = slot_schemas_init[s_slot]
+            already_loaded = any(
+                meta.get("detected_schema") == schema_key
+                for meta in st.session_state.datasets.values()
+            )
+            if not already_loaded:
+                load_dataset_from_source(s_path, expected_schema=schema_key, slot_key=s_slot)
 
 
 # ---------------- MAIN CONTENT ----------------
@@ -60,17 +77,25 @@ with st.container(border=True):
         with c_btn_local:
             if st.button("Load local", icon=":material/bolt:", width="stretch", help="Load detected files from local system and save paths"):
                 scanned = scan_default_local_files()
-                slot_schemas = {"arm": "ARM SERVICE NOW FILE", "ba": "BA-AS-A-SERVER", "cmdb": "CMDB-CI-SERVER"}
+                slot_schemas = {"arm": "ARM SERVICE NOW FILE", "ba": "BA-AS-A-SERVER", "cmdb": "CMDB-CI-SERVER", "axonius": "AXONIUS DEVICES", "rvtools": "RV_TOOLS", "visual_group": "VISUAL-GROUP", "sizing_report": "SIZING REPORT"}
                 for s_key, s_path in scanned.items():
                     if s_path and s_path.exists():
                         load_dataset_from_source(s_path, expected_schema=slot_schemas.get(s_key), slot_key=s_key)
                 st.session_state.active_app_num = ""
                 st.rerun()
         with c_btn_sample:
-            if st.button("Sample data", icon=":material/science:", width="stretch", help="Load built-in mock datasets"):
-                load_sample_data()
-                st.session_state.active_app_num = ""
-                st.rerun()
+            if st.button("Load sample files", icon=":material/folder_open:", width="stretch", help="Load the actual dataset files from samples/ or the launch folder"):
+                scanned = scan_default_local_files()
+                slot_schemas = {"arm": "ARM SERVICE NOW FILE", "ba": "BA-AS-A-SERVER", "cmdb": "CMDB-CI-SERVER", "axonius": "AXONIUS DEVICES", "rvtools": "RV_TOOLS", "visual_group": "VISUAL-GROUP", "sizing_report": "SIZING REPORT"}
+                loaded = 0
+                for s_key, s_path in scanned.items():
+                    if s_path and s_path.exists():
+                        loaded += bool(load_dataset_from_source(s_path, expected_schema=slot_schemas[s_key], slot_key=s_key))
+                if loaded:
+                    st.session_state.active_app_num = ""
+                    st.rerun()
+                else:
+                    st.warning("No dataset files found. Put the ARM ServiceNow, BA-AS-SERVER, and CMDB-CI-SERVER files in samples/ or upload them above.")
         with c_btn_clear:
             if st.button("Clear all", icon=":material/delete:", width="stretch", help="Clear all loaded datasets and saved path configuration"):
                 st.session_state.datasets.clear()
@@ -123,7 +148,7 @@ with st.container(border=True):
 
 if not st.session_state.datasets:
     # Empty State Guidance
-    st.info("Upload the Excel or CSV files above for **ARM Service Now**, **BA_AS_SERVER**, and **CMDB_CI_SERVER**, or click **Sample data** to preview application sizing immediately.", title="Getting started", icon=":material/lightbulb:")
+                    st.info("Upload the Excel or CSV files above for **ARM Service Now**, **BA_AS_SERVER**, and **CMDB_CI_SERVER**, or click **Load sample files** to load the actual datasets from `samples/`.", icon=":material/lightbulb:")
 else:
     # Top-level Tabs
     main_tab_lookup, main_tab_explorer = st.tabs([":material/search: Application sizing lookup", ":material/table_chart: Raw datasets explorer"])
@@ -280,7 +305,7 @@ else:
                                 help="Tables and indexes touched in a normal hour. RAM target = 1.5 x this.",
                             )
                             mem_profile = st.segmented_control(
-                                "Memory profile", ["Auto", "General Purpose", "Memory Optimized"], default="Auto", required=True,
+                                "Memory profile", ["Auto", "General Purpose", "Memory Optimized"], default="Auto",
                                 key=f"memprof_{k}",
                                 help="Auto picks E-series only when it reaches the RAM target with fewer vCores. General Purpose = 4 GiB/vCore. Memory Optimized = 8 GiB/vCore.",
                             )
@@ -509,6 +534,19 @@ else:
                 df = meta["df"]
                 detected = meta["detected_schema"]
 
+                if detected == "Custom / Unknown":
+                    possible_source = st.selectbox(
+                        "Classify this workbook",
+                        ["Custom / Unknown"] + list(SOURCE_ADAPTERS),
+                        key=f"classify_{file_name}",
+                        help="Choose a supported source format to normalize its records. Classification uses structure, not record values.",
+                    )
+                    if possible_source != "Custom / Unknown" and st.button("Apply source type", key=f"apply_source_{file_name}"):
+                        meta["detected_schema"] = possible_source
+                        meta["normalized_df"], meta["source_lineage"] = normalize_frame(df, possible_source, file_name)
+                        meta["validation"] = validate_source(df, possible_source)
+                        st.rerun()
+
                 # Sheet selector if Excel has multiple sheets
                 if meta.get("is_excel") and len(meta.get("sheets", [])) > 1:
                     col_sheet, col_empty = st.columns([2, 4])
@@ -526,12 +564,49 @@ else:
                             else:
                                 new_df = pd.read_excel(io.BytesIO(meta["file_bytes"]), sheet_name=new_sheet)
                             meta["df"] = new_df
-                            meta["detected_schema"] = detect_schema(file_name)
+                            meta["detected_schema"] = detect_schema(new_df.columns)
+                            meta["normalized_df"], meta["source_lineage"] = normalize_frame(new_df, meta["detected_schema"], file_name)
+                            meta["validation"] = validate_source(new_df, meta["detected_schema"])
                             st.rerun()
 
                 schema_info = KNOWN_SCHEMAS.get(detected, {})
                 desc = schema_info.get("description", "Uploaded custom or unclassified dataset")
                 st.info(f"**Detected Type:** `{detected}` — {desc}")
+
+                if detected in SOURCE_ADAPTERS:
+                    adapter = SOURCE_ADAPTERS[detected]
+                    with st.expander("Review schema, data quality, and field mappings", icon=":material/schema:"):
+                        overrides = meta.get("mapping_overrides", {})
+                        validation = meta.get("validation", validate_source(df, detected, overrides))
+                        missing = validation.get("missing_required", [])
+                        if missing:
+                            st.error("Required fields not mapped: " + ", ".join(missing))
+                        else:
+                            st.success("All required fields are available.")
+                        unmapped = validation.get("unmapped_columns", [])
+                        st.caption(f"{len(unmapped)} source columns are retained as extra fields. No source columns are discarded.")
+                        lineage = meta.get("source_lineage", {})
+                        if lineage:
+                            lineage_rows = [{"Canonical field": field, "Source file": detail["file"], "Source column": detail["column"]} for field, detail in lineage.items()]
+                            st.dataframe(pd.DataFrame(lineage_rows), hide_index=True, width="stretch")
+                        with st.form(f"mapping_form_{file_name}"):
+                            st.caption("Map canonical fields to source columns. Mappings apply to this file for the current session.")
+                            source_columns = [str(c) for c in df.columns]
+                            choices = ["(automatic / unmapped)"] + source_columns
+                            proposed = {}
+                            for canonical in dict.fromkeys(adapter["fields"].values()):
+                                current = next((c for c in source_columns if adapter["fields"].get("".join(ch for ch in c.lower() if ch.isalnum())) == canonical), "(automatic / unmapped)")
+                                selected = st.selectbox(canonical.replace("_", " ").title(), choices, index=choices.index(current) if current in choices else 0, key=f"map_{file_name}_{canonical}")
+                                if selected != "(automatic / unmapped)":
+                                    proposed[selected] = canonical
+                            if st.form_submit_button("Save field mappings"):
+                                meta["mapping_overrides"] = proposed
+                                meta["normalized_df"], meta["source_lineage"] = normalize_frame(df, detected, file_name, proposed)
+                                meta["validation"] = validate_source(df, detected, proposed)
+                                st.rerun()
+                        normalized_preview = meta.get("normalized_df")
+                        if normalized_preview is not None:
+                            st.dataframe(normalized_preview.head(20), width="stretch", hide_index=True)
 
                 ctrl_col1, ctrl_col2, ctrl_col3 = st.columns([3, 2, 2])
                 with ctrl_col1:

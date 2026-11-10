@@ -231,9 +231,9 @@ def lesson_start() -> None:
         "**The whole answer in one line:** start on **General Purpose D2ds_v5 or D4ds_v5**, "
         "**Premium SSD v2** storage, **PgBouncer** on. Everything else is a refinement."
     )
+    st.markdown("**One fact to remember**")
     st.info(
         "Single Server was retired on March 28, 2025. Flexible Server is the only option to plan around.",
-        title="One fact to remember",
         icon=":material/info:",
     )
     quiz(
@@ -306,7 +306,7 @@ def lesson_burst() -> None:
         )
     md("Why it matters: throttling means slow queries, timeouts, even an unreachable server. Try it:")
     c1, c2 = st.columns(2)
-    size = c1.segmented_control("Size", ["B1ms", "B2s", "B2ms"], default="B2s", required=True, key="burst_size")
+    size = c1.segmented_control("Size", ["B1ms", "B2s", "B2ms"], default="B2s", key="burst_size")
     load = c2.slider("Your average CPU use (% of the VM)", 0, 100, 55, key="burst_load")
     baseline = {"B1ms": 20, "B2s": 40, "B2ms": 60}[size]
     st.progress(min(load, 100) / 100, text=f"Load {load}% vs baseline {baseline}%")
@@ -360,7 +360,6 @@ def lesson_storage() -> None:
             "Server size",
             list(VMS),
             default="D2ds_v5",
-            required=True,
             key="disk_vm",
             format_func=lambda n: f"{n} · {VMS[n][0]} vCPU · {VMS[n][1]} GiB RAM",
             label_visibility="collapsed",
@@ -441,7 +440,6 @@ def lesson_conn() -> None:
         "Server",
         list(CONN_SKUS),
         default="D2ds_v5 (8 GiB)",
-        required=True,
         key="conn_sku",
     )
     c1, c2, c3 = st.columns(3)
@@ -488,7 +486,7 @@ def lesson_ha() -> None:
             "- **Backup:** a saved snapshot you can restore from. Different job from HA (see below)."
         )
     md("Pick an HA mode and see what it buys and costs.")
-    mode = st.segmented_control("HA mode", ["None", "Same-zone", "Zone-redundant"], default="Zone-redundant", required=True, key="ha_mode")
+    mode = st.segmented_control("HA mode", ["None", "Same-zone", "Zone-redundant"], default="Zone-redundant", key="ha_mode")
     sla, mult, note = {
         "None": ("99.9%", 1, "Cheapest. Fine for dev/test and staging."),
         "Same-zone": ("99.95%", 2, "Standby in the same zone. No protection if the zone fails."),

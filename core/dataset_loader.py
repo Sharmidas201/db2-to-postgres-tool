@@ -1,6 +1,7 @@
 """Dataset loading helpers shared by all pages."""
 
 import io
+import hashlib
 from pathlib import Path
 
 import pandas as pd
@@ -9,6 +10,40 @@ import streamlit as st
 from core.schemas import detect_schema
 from core.path_manager import find_local_system_path, save_persistent_path
 from core.sample_data import generate_sample_datasets
+from core.source_adapters import normalize_frame, validate_source
+
+
+def _read_dataset(file_ref, file_name, in_memory=False):
+    """Read a supported file and select the worksheet with the strongest schema match."""
+    if file_name.lower().endswith((".xlsx", ".xls")):
+        workbook = pd.ExcelFile(file_ref)
+        sheet_names = workbook.sheet_names
+        candidates = []
+        for index, sheet in enumerate(sheet_names):
+            header = pd.read_excel(workbook, sheet_name=sheet, nrows=0)
+            schema = detect_schema(header.columns)
+            candidates.append((schema != "Custom / Unknown", index, sheet, schema))
+        recognized = [candidate for candidate in candidates if candidate[0]]
+        if recognized:
+            _, _, selected_sheet, schema = recognized[0]
+        else:
+            selected_sheet = sheet_names[0]
+            schema = "Custom / Unknown"
+        return pd.read_excel(workbook, sheet_name=selected_sheet), sheet_names, selected_sheet, True, schema
+
+    df = pd.read_csv(file_ref)
+    return df, ["default"], "default", False, detect_schema(df.columns)
+
+
+def _file_digest(path=None, file_bytes=None):
+    digest = hashlib.sha256()
+    if path is not None:
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    else:
+        digest.update(file_bytes or b"")
+    return digest.hexdigest()
 
 
 def load_dataset_from_source(source, expected_schema=None, slot_key=None):
@@ -41,26 +76,22 @@ def load_dataset_from_source(source, expected_schema=None, slot_key=None):
         return False
 
     try:
+        source_hash = _file_digest(file_path, file_bytes) if file_path else _file_digest(file_bytes=file_bytes)
+        duplicate = next((name for name, meta in st.session_state.datasets.items() if meta.get("source_hash") == source_hash), None)
+        if duplicate and duplicate != file_name:
+            st.warning(f"This file matches already loaded dataset `{duplicate}`. Skipped duplicate import.")
+            return True
+
         schema = detect_schema(file_name)
         if schema == "Custom / Unknown" and expected_schema:
             schema = expected_schema
 
         if file_path:
-            if file_name.endswith((".xlsx", ".xls")):
-                excel_file = pd.ExcelFile(file_path)
-                sheet_names = excel_file.sheet_names
-                pref_sheet = sheet_names[0]
-                for s in sheet_names:
-                    if any(k in s.lower() for k in ["server", "sheet", "data"]):
-                        pref_sheet = s
-                        break
-                df = pd.read_excel(excel_file, sheet_name=pref_sheet)
-                is_excel = True
-            else:
-                df = pd.read_csv(file_path)
-                sheet_names = ["default"]
-                pref_sheet = "default"
-                is_excel = False
+            df, sheet_names, pref_sheet, is_excel, sheet_schema = _read_dataset(file_path, file_name)
+            if sheet_schema != "Custom / Unknown":
+                schema = sheet_schema
+            normalized_df, lineage = normalize_frame(df, schema, file_name)
+            validation = validate_source(df, schema)
 
             # Persist path if slot_key provided or derivable
             derived_slot = slot_key
@@ -79,6 +110,10 @@ def load_dataset_from_source(source, expected_schema=None, slot_key=None):
                 "file_bytes": None,
                 "df": df,
                 "detected_schema": schema,
+                "source_hash": source_hash,
+                "normalized_df": normalized_df,
+                "source_lineage": lineage,
+                "validation": validation,
                 "sheets": sheet_names,
                 "active_sheet": pref_sheet,
                 "is_excel": is_excel,
@@ -87,27 +122,21 @@ def load_dataset_from_source(source, expected_schema=None, slot_key=None):
             return True
         else:
             # In-memory uploaded bytes fallback
-            if file_name.endswith((".xlsx", ".xls")):
-                excel_file = pd.ExcelFile(io.BytesIO(file_bytes))
-                sheet_names = excel_file.sheet_names
-                pref_sheet = sheet_names[0]
-                for s in sheet_names:
-                    if any(k in s.lower() for k in ["server", "sheet", "data"]):
-                        pref_sheet = s
-                        break
-                df = pd.read_excel(excel_file, sheet_name=pref_sheet)
-                is_excel = True
-            else:
-                df = pd.read_csv(io.BytesIO(file_bytes))
-                sheet_names = ["default"]
-                pref_sheet = "default"
-                is_excel = False
+            df, sheet_names, pref_sheet, is_excel, sheet_schema = _read_dataset(io.BytesIO(file_bytes), file_name, in_memory=True)
+            if sheet_schema != "Custom / Unknown":
+                schema = sheet_schema
+            normalized_df, lineage = normalize_frame(df, schema, file_name)
+            validation = validate_source(df, schema)
 
             st.session_state.datasets[file_name] = {
                 "file_path": None,
                 "file_bytes": file_bytes,
                 "df": df,
                 "detected_schema": schema,
+                "source_hash": source_hash,
+                "normalized_df": normalized_df,
+                "source_lineage": lineage,
+                "validation": validation,
                 "sheets": sheet_names,
                 "active_sheet": pref_sheet,
                 "is_excel": is_excel,

@@ -98,11 +98,11 @@ def scan_default_local_files():
     Scans ./samples and ./ for the 3 required dataset files.
     Returns dict mapping slot keys ('arm', 'ba', 'cmdb') to resolved Path or None.
     """
-    found = {"arm": None, "ba": None, "cmdb": None}
+    found = {"arm": None, "ba": None, "cmdb": None, "axonius": None, "rvtools": None, "visual_group": None, "sizing_report": None}
     saved = load_persistent_paths()
 
     # Pre-populate from saved config if valid
-    for slot in ["arm", "ba", "cmdb"]:
+    for slot in ["arm", "ba", "cmdb", "axonius", "rvtools", "visual_group", "sizing_report"]:
         if slot in saved and Path(saved[slot]).exists():
             found[slot] = Path(saved[slot]).resolve()
 
@@ -113,5 +113,13 @@ def scan_default_local_files():
         found["ba"] = find_local_system_path("ba_as_server") or find_local_system_path("ba_as_a_server")
     if not found["cmdb"]:
         found["cmdb"] = find_local_system_path("cmdb_ci_server")
+    if not found["axonius"]:
+        found["axonius"] = find_local_system_path("axonius")
+    if not found["rvtools"]:
+        found["rvtools"] = find_local_system_path("rvtools")
+    if not found["visual_group"]:
+        found["visual_group"] = find_local_system_path("visual_group")
+    if not found["sizing_report"]:
+        found["sizing_report"] = find_local_system_path("sizing_report")
 
     return found

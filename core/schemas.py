@@ -31,6 +31,30 @@ KNOWN_SCHEMAS = {
         ],
         "primary_id": "fqdn",
         "keyword": "cmdb_ci_server"
+    },
+    "AXONIUS DEVICES": {
+        "description": "Device inventory with compute, memory, storage, and operating system attributes",
+        "key_columns": ["Aggregated: Preferred Host Name (FQDN)", "Aggregated: Preferred Total CPU Cores", "Aggregated: Preferred Total RAM (GB)"],
+        "primary_id": "Aggregated: Preferred Host Name (FQDN)",
+        "keyword": "axonius"
+    },
+    "RV_TOOLS": {
+        "description": "VMware virtual machine inventory with compute and storage attributes",
+        "key_columns": ["VM", "DNS Name", "CPUs", "Memory", "Total disk capacity MiB"],
+        "primary_id": "VM",
+        "keyword": "rvtools"
+    },
+    "VISUAL-GROUP": {
+        "description": "Application portfolio, grouping, and dependency inventory",
+        "key_columns": ["Number", "DisplayName", "Hostname"],
+        "primary_id": "Number",
+        "keyword": "visualgroup"
+    },
+    "SIZING REPORT": {
+        "description": "Previously generated application hardware sizing report",
+        "key_columns": ["Server FQDN", "vCPUs", "RAM (GB)", "Allocated Disk (GB)"],
+        "primary_id": "Server FQDN",
+        "keyword": "sizingreport"
     }
 }
 
@@ -59,15 +83,8 @@ def detect_schema(filename_or_text):
     """
     if not isinstance(filename_or_text, str):
         # Fallback if an iterable of column names was passed
-        col_str = " ".join([str(c) for c in filename_or_text]).lower()
-        clean_cols = normalize_name(col_str)
-        if "u_business_application_1" in col_str or "baasserver" in clean_cols:
-            return "BA-AS-A-SERVER"
-        elif "cmdbciserver" in clean_cols or ("cpu_core_count" in col_str and "fqdn" in col_str):
-            return "CMDB-CI-SERVER"
-        elif "armservicenow" in clean_cols or ("arm" in col_str and "service" in col_str):
-            return "ARM SERVICE NOW FILE"
-        return "Custom / Unknown"
+        from core.source_adapters import source_for_columns
+        return source_for_columns(filename_or_text)
 
     clean = normalize_name(filename_or_text)
 
@@ -75,6 +92,14 @@ def detect_schema(filename_or_text):
         return "BA-AS-A-SERVER"
     elif check_filename_includes(clean, "cmdb_ci_server"):
         return "CMDB-CI-SERVER"
+    elif "axonius" in clean:
+        return "AXONIUS DEVICES"
+    elif "rvtools" in clean or "rvtoolsexport" in clean:
+        return "RV_TOOLS"
+    elif "visualgroup" in clean:
+        return "VISUAL-GROUP"
+    elif "sizingreport" in clean:
+        return "SIZING REPORT"
     elif check_filename_includes(clean, "ARM Service now") or ("arm" in clean and "service" in clean):
         return "ARM SERVICE NOW FILE"
 

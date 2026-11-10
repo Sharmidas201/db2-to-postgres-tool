@@ -47,18 +47,18 @@ def extract_app_numbers(datasets):
     app_numbers = set()
 
     for meta in datasets.values():
-        df = meta["df"]
+        df = meta.get("normalized_df", meta["df"])
         schema = meta.get("detected_schema", "")
 
         # Check ARM
-        if schema == "ARM SERVICE NOW FILE" or "Number" in df.columns:
-            for col in ["Number", "number", "u_number"]:
+        if schema in {"ARM SERVICE NOW FILE", "VISUAL-GROUP"} or "application_id" in df.columns or "Number" in df.columns:
+            for col in ["application_id", "Number", "number", "u_number"]:
                 if col in df.columns:
                     app_numbers.update(df[col].dropna().astype(str).str.strip().unique())
 
         # Check BA-AS-A-SERVER
-        if schema == "BA-AS-A-SERVER" or "u_business_application_1.number" in df.columns:
-            for col in ["u_business_application_1.number", "number"]:
+        if schema == "BA-AS-A-SERVER" or "application_id" in df.columns or "u_business_application_1.number" in df.columns:
+            for col in ["application_id", "u_business_application_1.number", "number"]:
                 if col in df.columns:
                     app_numbers.update(df[col].dropna().astype(str).str.strip().unique())
 
@@ -67,202 +67,116 @@ def extract_app_numbers(datasets):
 
 
 def lookup_application(app_number, datasets):
-    """
-    Given an app_number and the loaded datasets, returns:
-    - app_info: dict of application metadata from ARM
-    - servers_df: DataFrame of linked servers with matched hardware specs
-    - rollup: summary dict of total servers, vCPU, RAM (GB), Allocated Storage (GB), Consumed Storage (GB)
-    """
-    app_number_clean = str(app_number).strip().lower()
+    """Join canonical application, relationship, and server records dynamically."""
+    from core.source_adapters import normalize_frame
 
-    # 1. Identify dataset DataFrames
-    arm_df = None
-    ba_df = None
-    rv_df = None
-    cmdb_df = None
-    axonius_df = None
+    app_key = str(app_number).strip().casefold()
+    apps, links, servers = [], [], []
+    for filename, meta in datasets.items():
+        schema = meta.get("detected_schema", "Custom / Unknown")
+        raw = meta["df"]
+        canonical = meta.get("normalized_df")
+        if canonical is None:
+            canonical, _ = normalize_frame(raw, schema, filename)
+        if schema in {"ARM SERVICE NOW FILE", "VISUAL-GROUP"}:
+            apps.append((raw, canonical))
+        if schema in {"BA-AS-A-SERVER", "VISUAL-GROUP"}:
+            links.append(canonical)
+        if schema in {"CMDB-CI-SERVER", "AXONIUS DEVICES", "RV_TOOLS", "SIZING REPORT"}:
+            servers.append((schema, canonical))
 
-    for meta in datasets.values():
-        schema = meta.get("detected_schema")
-        df = meta["df"]
-        if schema == "ARM SERVICE NOW FILE":
-            arm_df = df
-        elif schema == "BA-AS-A-SERVER":
-            ba_df = df
-        elif schema == "RV_TOOLS":
-            rv_df = df
-        elif schema == "CMDB-CI-SERVER":
-            cmdb_df = df
-        elif schema == "AXONIUS DEVICES":
-            axonius_df = df
-
-    # Fallback to column matching if schema detection didn't set the exact name
-    if arm_df is None:
-        for meta in datasets.values():
-            if "Number" in meta["df"].columns and "Install Status" in meta["df"].columns:
-                arm_df = meta["df"]
-                break
-
-    if ba_df is None:
-        for meta in datasets.values():
-            if "u_business_application_1.number" in meta["df"].columns:
-                ba_df = meta["df"]
-                break
-
-    # 2. Get Application Info from ARM
     app_info = {"Application Number": app_number}
-    if arm_df is not None:
-        # Match on Number column
-        col_candidates = [c for c in arm_df.columns if c.strip().lower() in ["number", "u_number"]]
-        if col_candidates:
-            match = arm_df[arm_df[col_candidates[0]].astype(str).str.strip().str.lower() == app_number_clean]
-            if not match.empty:
-                row = match.iloc[0]
-                for col in arm_df.columns:
-                    if pd.notna(row[col]):
-                        app_info[col] = str(row[col])
+    app_match = None
+    for raw, canonical in apps:
+        if "application_id" not in canonical:
+            continue
+        matches = canonical[canonical["application_id"].astype(str).str.strip().str.casefold() == app_key]
+        if not matches.empty:
+            app_match = matches.iloc[0]
+            raw_match = raw.loc[matches.index[0]]
+            app_info.update({str(c): str(raw_match[c]) for c in raw.columns if pd.notna(raw_match[c])})
+            break
+    if app_match is not None:
+        def app_value(field, legacy, default):
+            value = app_match.get(field)
+            return str(value) if pd.notna(value) and str(value).strip() else app_info.get(legacy, default)
 
-    # 3. Find Servers from BA-AS-A-SERVER
-    servers_list = []
-    if ba_df is not None:
-        col_app_num = None
-        for c in ["u_business_application_1.number", "Number", "number"]:
-            if c in ba_df.columns:
-                col_app_num = c
-                break
-
-        if col_app_num:
-            matched_ba = ba_df[ba_df[col_app_num].astype(str).str.strip().str.lower() == app_number_clean]
-            for _, row in matched_ba.iterrows():
-                fqdn = normalize_str(row.get("u_server_1.fqdn", row.get("fqdn", "")))
-                ip = normalize_str(row.get("u_server_1.ip_address", row.get("ip_address", "")))
-                app_name = normalize_str(row.get("u_business_application_1", app_info.get("Name", "")))
-                is_virt = normalize_str(row.get("u_server_1.virtual", row.get("virtual", "")))
-                env = normalize_str(row.get("u_server_1.environment", row.get("environment", "")))
-                os_name = normalize_str(row.get("u_server_1.os", row.get("os", "")))
-
-                servers_list.append({
-                    "Server FQDN": fqdn,
-                    "Hostname": fqdn.split(".")[0] if fqdn else "",
-                    "IP Address": ip,
-                    "Virtual": is_virt,
-                    "Environment": env,
-                    "OS": os_name,
-                    "Application Name": app_name
-                })
-
-    # If BA is not provided but RV/CMDB is, we don't have mapping, but let's check
-    if not servers_list and "Name" in app_info and not ba_df:
-        # No BA mapping uploaded
-        pass
-
-    # 4. Enrich Servers with Hardware Specs (RV_TOOLS primary for VMs, CMDB for physical/fallback)
-    enriched_servers = []
-
-    # Pre-index RV_Tools by lowercase FQDN/DNS Name and VM name
-    rv_map = {}
-    if rv_df is not None:
-        for _, r in rv_df.iterrows():
-            dns = normalize_str(r.get("DNS Name", "")).lower()
-            vm = normalize_str(r.get("VM", "")).lower()
-            if dns:
-                rv_map[dns] = r
-            if vm:
-                rv_map[vm] = r
-
-    # Pre-index CMDB by lowercase FQDN and Name
-    cmdb_map = {}
-    if cmdb_df is not None:
-        for _, r in cmdb_df.iterrows():
-            fqdn = normalize_str(r.get("fqdn", "")).lower()
-            name = normalize_str(r.get("name", "")).lower()
-            if fqdn:
-                cmdb_map[fqdn] = r
-            if name:
-                cmdb_map[name] = r
-
-    for s in servers_list:
-        fqdn = s["Server FQDN"].lower()
-        host = s["Hostname"].lower()
-
-        cpus = 0
-        ram_gb = 0.0
-        alloc_disk_gb = 0.0
-        in_use_disk_gb = 0.0
-        hardware_source = "None (Unmatched)"
-
-        # Check RV_Tools first
-        rv_match = rv_map.get(fqdn)
-        if rv_match is None:
-            rv_match = rv_map.get(host)
-
-        if rv_match is not None:
-            hardware_source = "RV_TOOLS (VMware)"
-            try:
-                cpus = int(pd.to_numeric(rv_match.get("CPUs", 0), errors="coerce") or 0)
-            except Exception:
-                cpus = 0
-            ram_gb = parse_ram_to_gb(rv_match.get("Memory", 0))
-            alloc_disk_gb = parse_disk_to_gb(rv_match.get("Total disk capacity MiB", 0), is_mib=True)
-            in_use_disk_gb = parse_disk_to_gb(rv_match.get("In Use MiB", 0), is_mib=True)
-            if not s["OS"] and pd.notna(rv_match.get("OS according to the configuration file")):
-                s["OS"] = str(rv_match.get("OS according to the configuration file"))
-            s["Virtual"] = "true"
-        else:
-            # Check CMDB-CI-SERVER
-            cmdb_match = cmdb_map.get(fqdn)
-            if cmdb_match is None:
-                cmdb_match = cmdb_map.get(host)
-
-            if cmdb_match is not None:
-                hardware_source = "CMDB-CI-SERVER"
-                try:
-                    cpus = int(pd.to_numeric(cmdb_match.get("cpu_core_count", 0), errors="coerce") or 0)
-                except Exception:
-                    cpus = 0
-                ram_gb = parse_ram_to_gb(cmdb_match.get("ram", 0))
-                alloc_disk_gb = parse_disk_to_gb(cmdb_match.get("disk_space", 0), is_mib=False)
-                in_use_disk_gb = alloc_disk_gb  # In-use usually not reported in CMDB
-                if not s["OS"] and pd.notna(cmdb_match.get("os")):
-                    s["OS"] = str(cmdb_match.get("os"))
-
-        enriched_servers.append({
-            "Server FQDN": s["Server FQDN"],
-            "IP Address": s["IP Address"],
-            "Environment": s["Environment"],
-            "Virtual": s["Virtual"],
-            "OS": s["OS"],
-            "vCPUs": cpus,
-            "RAM (GB)": ram_gb,
-            "Allocated Disk (GB)": alloc_disk_gb,
-            "In-Use Disk (GB)": in_use_disk_gb,
-            "Hardware Source": hardware_source
+        app_info.update({
+            "Name": app_value("application_name", "Name", "Name Not Specified in Catalog"),
+            "Environment": app_value("environment", "Environment", "Unknown"),
+            "Business criticality": app_value("business_criticality", "Business criticality", "Unknown"),
+            "IT Application owner": app_value("application_owner", "IT Application owner", "Not Listed"),
+            "Install Status": app_value("install_status", "Install Status", "Unknown"),
+            "Architecture type": app_value("architecture_type", "Architecture type", "N/A"),
         })
 
-    servers_df = pd.DataFrame(enriched_servers)
+    link_rows = []
+    for frame in links:
+        if "application_id" not in frame:
+            continue
+        matched = frame[frame["application_id"].astype(str).str.strip().str.casefold() == app_key]
+        link_rows.extend(matched.to_dict("records"))
 
-    # 5. Compute Rollup Metrics
-    if not servers_df.empty:
-        rollup = {
-            "Total Servers": len(servers_df),
-            "Total vCPUs": int(servers_df["vCPUs"].sum()),
-            "Total RAM (GB)": round(servers_df["RAM (GB)"].sum(), 1),
-            "Total Allocated Disk (GB)": round(servers_df["Allocated Disk (GB)"].sum(), 1),
-            "Total In-Use Disk (GB)": round(servers_df["In-Use Disk (GB)"].sum(), 1),
-            "Virtual Servers": int((servers_df["Virtual"].str.lower() == "true").sum()),
-            "Physical Servers": int((servers_df["Virtual"].str.lower() != "true").sum()),
-        }
-    else:
-        rollup = {
-            "Total Servers": 0,
-            "Total vCPUs": 0,
-            "Total RAM (GB)": 0.0,
-            "Total Allocated Disk (GB)": 0.0,
-            "Total In-Use Disk (GB)": 0.0,
-            "Virtual Servers": 0,
-            "Physical Servers": 0,
-        }
+    # Index hardware records by normalized FQDN and hostname. Later sources only
+    # fill missing values, preserving the richer record where multiple sources match.
+    hardware = {}
+    source_priority = {"RV_TOOLS": 0, "CMDB-CI-SERVER": 1, "AXONIUS DEVICES": 2, "SIZING REPORT": 3}
+    servers.sort(key=lambda item: source_priority.get(item[0], 10))
+    for source, frame in servers:
+        for _, row in frame.iterrows():
+            fqdn = normalize_str(row.get("server_fqdn", "")).casefold()
+            name = normalize_str(row.get("server_name", "")).casefold()
+            for key in (fqdn, name, name.split(".")[0] if name else ""):
+                if key:
+                    hardware.setdefault(key, {})
+                    for field, value in row.items():
+                        if field.startswith("extra:") or pd.isna(value) or str(value).strip() == "":
+                            continue
+                        hardware[key].setdefault(field, value)
+                    hardware[key].setdefault("hardware_source", source)
 
+    output = []
+    seen = set()
+    for link in link_rows:
+        fqdn = normalize_str(link.get("server_fqdn", ""))
+        hostname = fqdn.split(".")[0]
+        if (fqdn or hostname).casefold() in seen:
+            continue
+        seen.add((fqdn or hostname).casefold())
+        hw = hardware.get(fqdn.casefold(), hardware.get(hostname.casefold(), {}))
+        cpu = pd.to_numeric(hw.get("cpu_cores", 0), errors="coerce")
+        cpu = int(cpu) if pd.notna(cpu) else 0
+        ram_value = hw.get("memory_gb", hw.get("memory", 0))
+        disk_value = hw.get("allocated_storage_gb", hw.get("allocated_storage_mib", hw.get("allocated_storage", 0)))
+        disk_mib = "allocated_storage_mib" in hw
+        used_value = hw.get("used_storage_mib", hw.get("used_storage_gb", 0))
+        allocated_gb = parse_disk_to_gb(disk_value, is_mib=disk_mib)
+        used_gb = parse_disk_to_gb(used_value, is_mib="used_storage_mib" in hw) if ("used_storage_mib" in hw or "used_storage_gb" in hw) else allocated_gb
+        virtual = link.get("is_virtual", hw.get("is_virtual", ""))
+        output.append({
+            "Server FQDN": fqdn or normalize_str(hw.get("server_fqdn", "")),
+            "IP Address": normalize_str(link.get("server_ip", hw.get("server_ip", ""))),
+            "Environment": normalize_str(link.get("environment", hw.get("environment", ""))),
+            "Virtual": normalize_str(virtual),
+            "OS": normalize_str(link.get("operating_system", hw.get("operating_system", ""))),
+            "vCPUs": cpu,
+            "RAM (GB)": parse_ram_to_gb(ram_value),
+            "Allocated Disk (GB)": allocated_gb,
+            "In-Use Disk (GB)": used_gb,
+            "Hardware Source": hw.get("hardware_source", "None (Unmatched)"),
+        })
+
+    servers_df = pd.DataFrame(output, columns=["Server FQDN", "IP Address", "Environment", "Virtual", "OS", "vCPUs", "RAM (GB)", "Allocated Disk (GB)", "In-Use Disk (GB)", "Hardware Source"])
+    virtual = servers_df["Virtual"].fillna("").astype(str).str.casefold().isin(["true", "yes", "1", "virtual"])
+    rollup = {
+        "Total Servers": len(servers_df),
+        "Total vCPUs": int(servers_df["vCPUs"].sum()) if not servers_df.empty else 0,
+        "Total RAM (GB)": round(servers_df["RAM (GB)"].sum(), 1) if not servers_df.empty else 0.0,
+        "Total Allocated Disk (GB)": round(servers_df["Allocated Disk (GB)"].sum(), 1) if not servers_df.empty else 0.0,
+        "Total In-Use Disk (GB)": round(servers_df["In-Use Disk (GB)"].sum(), 1) if not servers_df.empty else 0.0,
+        "Virtual Servers": int(virtual.sum()),
+        "Physical Servers": int((~virtual).sum()),
+    }
     return app_info, servers_df, rollup
 
 
